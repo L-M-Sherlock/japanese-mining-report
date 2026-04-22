@@ -1,0 +1,7 @@
+[project]
+name = "japanese-mining-report"
+version = "0.1.0"
+description = "Visualize where Anki Lapis cards came from while mining Japanese."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
