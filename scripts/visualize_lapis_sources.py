@@ -329,7 +329,12 @@ def render_bar_rows(
         count = row[1]
         studied = row[2] if len(row) > 2 else None
         width = (count / max_count) * 100 if max_count else 0
-        value_text = f"{studied:,}/{count:,}" if studied is not None else f"{count:,}"
+        if studied is not None and count:
+            value_text = f"{studied:,}/{count:,} ({studied / count * 100:.1f}%)"
+        elif studied is not None:
+            value_text = f"{studied:,}/{count:,} (0.0%)"
+        else:
+            value_text = f"{count:,}"
         if studied is not None and count:
             studied_width = (studied / count) * 100
             remaining_width = 100 - studied_width
@@ -449,6 +454,7 @@ def build_html(
     studied_cards = sum(record.studied for record in records)
     total_cards = len(records)
     generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    studied_percent = (studied_cards / total_cards * 100) if total_cards else 0
 
     deck_scope_en = deck_contains or "(all decks with matching note type)"
     deck_scope_zh = deck_contains or "（匹配该笔记类型的全部牌组）"
@@ -458,7 +464,11 @@ def build_html(
     summary_cards = "\n".join(
         [
             render_summary_card("Cards", "卡片数", f"{total_cards:,}"),
-            render_summary_card("Studied cards", "已学卡片", f"{studied_cards:,}"),
+            render_summary_card(
+                "Studied cards",
+                "已学卡片",
+                f"{studied_cards:,} ({studied_percent:.1f}%)",
+            ),
             render_summary_card(
                 "Distinct source entries", "来源条目数", f"{len(source_counts):,}"
             ),
@@ -523,12 +533,12 @@ def build_html(
         (
             "Best-effort grouping of mined cards into higher-level works or source "
             "materials based on the text stored in <code>MiscInfo</code>. Values are "
-            "shown as studied/mined, with dark bars for studied cards and light bars "
-            "for mined-but-not-yet-studied cards."
+            "shown as studied/mined with percentages, with dark bars for studied cards "
+            "and light bars for mined-but-not-yet-studied cards."
         ),
         (
             "根据 <code>MiscInfo</code> 中记录的文本，对挖卡来源做尽力而为的高层级"
-            "作品 / 材料归并。右侧数值显示为 已学/挖卡。"
+            "作品 / 材料归并。右侧数值显示为 已学/挖卡（百分比）。"
         ),
         escape_text=False,
     )
@@ -545,12 +555,13 @@ def build_html(
     sources_intro = render_bilingual(
         (
             "Exact source strings from <code>MiscInfo</code> after stripping "
-            "timestamps like <code>(2m21s)</code>. Values are shown as studied/mined, "
-            "with dark bars for studied cards and light bars for mined-but-not-yet-studied cards."
+            "timestamps like <code>(2m21s)</code>. Values are shown as studied/mined "
+            "with percentages, with dark bars for studied cards and light bars for "
+            "mined-but-not-yet-studied cards."
         ),
         (
             "这里展示 <code>MiscInfo</code> 中的精确来源字符串，并去掉了像 "
-            "<code>(2m21s)</code> 这样的时间戳。右侧数值显示为 已学/挖卡。"
+            "<code>(2m21s)</code> 这样的时间戳。右侧数值显示为 已学/挖卡（百分比）。"
         ),
         escape_text=False,
     )
@@ -698,7 +709,6 @@ def build_html(
     }}
     .grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 18px;
     }}
     .panel {{
@@ -714,7 +724,7 @@ def build_html(
     }}
     .bar-row {{
       display: grid;
-      grid-template-columns: minmax(0, 1.8fr) minmax(100px, 1.7fr) 12ch;
+      grid-template-columns: minmax(0, 1.8fr) minmax(100px, 1.7fr) 20ch;
       align-items: center;
       gap: 10px;
       font-size: 0.95rem;
@@ -769,7 +779,7 @@ def build_html(
       text-align: right;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
-      width: 12ch;
+      width: 20ch;
     }}
     .note {{
       margin-top: 10px;
