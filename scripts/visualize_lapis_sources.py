@@ -293,22 +293,34 @@ def build_progress_rows(
     ]
 
 
+def render_bilingual(en: str, zh: str, *, escape_text: bool = True) -> str:
+    if escape_text:
+        en = html.escape(en)
+        zh = html.escape(zh)
+    return (
+        f"<span class='lang lang-en'>{en}</span>"
+        f"<span class='lang lang-zh'>{zh}</span>"
+    )
+
+
 def render_bar_rows(
     rows: list[tuple[str, int] | tuple[str, int, int]],
     left_header: str = "Label",
+    left_header_zh: str = "标签",
     right_header: str = "Studied / mined",
+    right_header_zh: str = "已学 / 挖卡",
 ) -> str:
     if not rows:
-        return "<p class='muted'>No data.</p>"
+        return f"<p class='muted'>{render_bilingual('No data.', '没有数据。')}</p>"
 
     max_count = rows[0][1]
     pieces = [
         "<div class='bars'>",
         (
             "<div class='bar-row bar-row-header'>"
-            f"<div class='bar-header-label'>{html.escape(left_header)}</div>"
-            "<div class='bar-header-progress'>Progress</div>"
-            f"<div class='bar-header-value'>{html.escape(right_header)}</div>"
+            f"<div class='bar-header-label'>{render_bilingual(left_header, left_header_zh)}</div>"
+            f"<div class='bar-header-progress'>{render_bilingual('Progress', '进度')}</div>"
+            f"<div class='bar-header-value'>{render_bilingual(right_header, right_header_zh)}</div>"
             "</div>"
         ),
     ]
@@ -350,11 +362,11 @@ def render_bar_rows(
     return "\n".join(pieces)
 
 
-def render_summary_card(label: str, value: str) -> str:
+def render_summary_card(label_en: str, label_zh: str, value: str) -> str:
     return (
         "<div class='summary-card'>"
         f"<div class='summary-value'>{html.escape(value)}</div>"
-        f"<div class='summary-label'>{html.escape(label)}</div>"
+        f"<div class='summary-label'>{render_bilingual(label_en, label_zh)}</div>"
         "</div>"
     )
 
@@ -370,16 +382,29 @@ def render_table(records: list[Record], total_cards: int) -> str:
         record = source_meta[source]
         share = count / total_cards if total_cards else 0
         search_blob = " ".join(
-            part.casefold() for part in (record.source, record.work, record.domain, record.deck)
+            part.casefold() for part in (record.source, record.work)
         )
         rows.append(
             "".join(
                 [
                     f"<tr data-search='{html.escape(search_blob)}'>",
-                    f"<td data-label='Source'>{html.escape(record.source)}</td>",
-                    f"<td data-label='Work / material (heuristic)'>{html.escape(record.work)}</td>",
-                    f"<td data-label='Cards'>{count}</td>",
-                    f"<td data-label='Share'>{share * 100:.2f}%</td>",
+                    (
+                        f"<td data-label='Source' data-label-en='Source' "
+                        f"data-label-zh='来源'>{html.escape(record.source)}</td>"
+                    ),
+                    (
+                        f"<td data-label='Work / material (heuristic)' "
+                        f"data-label-en='Work / material (heuristic)' "
+                        f"data-label-zh='作品 / 材料（启发式）'>{html.escape(record.work)}</td>"
+                    ),
+                    (
+                        f"<td data-label='Cards' data-label-en='Cards' "
+                        f"data-label-zh='卡片'>{count}</td>"
+                    ),
+                    (
+                        f"<td data-label='Share' data-label-en='Share' "
+                        f"data-label-zh='占比'>{share * 100:.2f}%</td>"
+                    ),
                     "</tr>",
                 ]
             )
@@ -388,10 +413,22 @@ def render_table(records: list[Record], total_cards: int) -> str:
     return "\n".join(
         [
             "<div class='table-toolbar'>",
-            "<input id='sourceFilter' type='search' placeholder='Filter by source or work / material'>",
+            (
+                "<input id='sourceFilter' type='search' "
+                "placeholder='Filter by source or work / material' "
+                "data-placeholder-en='Filter by source or work / material' "
+                "data-placeholder-zh='按来源或作品 / 材料筛选'>"
+            ),
             "</div>",
             "<table id='sourceTable'>",
-            "<thead><tr><th>Source</th><th>Work / material (heuristic)</th><th>Cards</th><th>Share</th></tr></thead>",
+            (
+                "<thead><tr>"
+                f"<th>{render_bilingual('Source', '来源')}</th>"
+                f"<th>{render_bilingual('Work / material (heuristic)', '作品 / 材料（启发式）')}</th>"
+                f"<th>{render_bilingual('Cards', '卡片')}</th>"
+                f"<th>{render_bilingual('Share', '占比')}</th>"
+                "</tr></thead>"
+            ),
             "<tbody>",
             *rows,
             "</tbody>",
@@ -408,36 +445,132 @@ def build_html(
 ) -> str:
     source_counts = Counter(record.source for record in records)
     work_counts = Counter(record.work for record in records)
-    domain_counts = Counter(record.domain for record in records)
     deck_counts = Counter(record.deck for record in records)
     studied_cards = sum(record.studied for record in records)
     total_cards = len(records)
     generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-    deck_scope = deck_contains or "(all decks with matching note type)"
+    deck_scope_en = deck_contains or "(all decks with matching note type)"
+    deck_scope_zh = deck_contains or "（匹配该笔记类型的全部牌组）"
+    note_type_escaped = html.escape(note_type_name)
+    generated_at_escaped = html.escape(generated_at)
 
     summary_cards = "\n".join(
         [
-            render_summary_card("Cards", f"{total_cards:,}"),
-            render_summary_card("Studied cards", f"{studied_cards:,}"),
-            render_summary_card("Distinct source entries", f"{len(source_counts):,}"),
-            render_summary_card("Distinct works / materials", f"{len(work_counts):,}"),
-            render_summary_card("Decks", f"{len(deck_counts):,}"),
+            render_summary_card("Cards", "卡片数", f"{total_cards:,}"),
+            render_summary_card("Studied cards", "已学卡片", f"{studied_cards:,}"),
+            render_summary_card(
+                "Distinct source entries", "来源条目数", f"{len(source_counts):,}"
+            ),
+            render_summary_card(
+                "Distinct works / materials",
+                "作品 / 材料数",
+                f"{len(work_counts):,}",
+            ),
+            render_summary_card("Decks", "牌组数", f"{len(deck_counts):,}"),
         ]
     )
 
     work_chart = render_bar_rows(
         build_progress_rows(records, lambda record: record.work, top_n),
         left_header="Work / material",
+        left_header_zh="作品 / 材料",
     )
     source_chart = render_bar_rows(
         build_progress_rows(records, lambda record: record.source, top_n),
         left_header="Source",
+        left_header_zh="来源",
     )
     table_html = render_table(records, total_cards)
+    title_html = render_bilingual("Japanese mining report", "日语挖卡报告")
+    hero_intro = render_bilingual(
+        (
+            "This report visualizes where your "
+            f"<code>{note_type_escaped}</code> cards came from while mining Japanese "
+            "from different materials. It reads the <code>MiscInfo</code> field, "
+            "which often stores the title, file name, timestamp, or URL of the "
+            "sentence, word, or page you mined. The work/material grouping is "
+            "heuristic: it tries to merge episode-level or chapter-level source "
+            "names into a higher-level title, but entries with only partial names "
+            "cannot always be merged perfectly."
+        ),
+        (
+            "这个报告用来可视化你在学习日语过程中从不同材料中挖出来的 "
+            f"<code>{note_type_escaped}</code> 卡片来源。它读取 "
+            "<code>MiscInfo</code> 字段，该字段通常记录你挖取的句子、单词或页面"
+            "的标题、文件名、时间戳或 URL。作品 / 材料分组是启发式的：它会尽量把"
+            "按集或按章拆开的来源名合并到更高层级的标题，但只有部分名称的条目不一定"
+            "能完全合并。"
+        ),
+        escape_text=False,
+    )
+    meta_note_type = render_bilingual(
+        f"Note type: {note_type_escaped}",
+        f"笔记类型：{note_type_escaped}",
+        escape_text=False,
+    )
+    meta_deck_scope = render_bilingual(
+        f"Deck filter: {html.escape(deck_scope_en)}",
+        f"牌组筛选：{html.escape(deck_scope_zh)}",
+        escape_text=False,
+    )
+    meta_generated_at = render_bilingual(
+        f"Generated: {generated_at_escaped}",
+        f"生成时间：{generated_at_escaped}",
+        escape_text=False,
+    )
+    works_intro = render_bilingual(
+        (
+            "Best-effort grouping of mined cards into higher-level works or source "
+            "materials based on the text stored in <code>MiscInfo</code>. Values are "
+            "shown as studied/mined, with dark bars for studied cards and light bars "
+            "for mined-but-not-yet-studied cards."
+        ),
+        (
+            "根据 <code>MiscInfo</code> 中记录的文本，对挖卡来源做尽力而为的高层级"
+            "作品 / 材料归并。右侧数值显示为 已学/挖卡。"
+        ),
+        escape_text=False,
+    )
+    works_note = render_bilingual(
+        (
+            "Useful for seeing which shows, novels, manga, visual novels, readers, "
+            "or websites contributed the most cards to your Japanese mining. Not exact."
+        ),
+        (
+            "用来查看哪些动画、小说、漫画、视觉小说、阅读器或网站为你的日语"
+            "挖卡贡献了最多卡片。结果并非完全精确。"
+        ),
+    )
+    sources_intro = render_bilingual(
+        (
+            "Exact source strings from <code>MiscInfo</code> after stripping "
+            "timestamps like <code>(2m21s)</code>. Values are shown as studied/mined, "
+            "with dark bars for studied cards and light bars for mined-but-not-yet-studied cards."
+        ),
+        (
+            "这里展示 <code>MiscInfo</code> 中的精确来源字符串，并去掉了像 "
+            "<code>(2m21s)</code> 这样的时间戳。右侧数值显示为 已学/挖卡。"
+        ),
+        escape_text=False,
+    )
+    sources_note = render_bilingual(
+        (
+            "Useful when you want to see which exact episode, subtitle file, chapter, "
+            "reader tab, page, or other mined source produced the most cards."
+        ),
+        (
+            "用来查看到底是哪一集、哪份字幕、哪一章、哪个阅读器标签页或哪个页面"
+            "产出了最多卡片。"
+        ),
+    )
+    table_intro = render_bilingual(
+        "Filter the table below to inspect specific sources and grouped works / materials.",
+        "用下面的表格筛选和查看具体来源，以及归并后的作品 / 材料。",
+    )
 
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -452,6 +585,12 @@ def build_html(
       --accent: #c96b3b;
       --accent-soft: #efd0c1;
       --bar-bg: #eee6d7;
+    }}
+    html[data-lang="en"] .lang-zh {{
+      display: none;
+    }}
+    html[data-lang="zh"] .lang-en {{
+      display: none;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -490,6 +629,36 @@ def build_html(
       border-radius: 20px;
       padding: 24px;
       box-shadow: 0 16px 40px rgba(67, 40, 20, 0.06);
+    }}
+    .hero-top {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      flex-wrap: wrap;
+    }}
+    .lang-toggle {{
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px;
+      background: #f3ebdf;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+    }}
+    .lang-button {{
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 10px;
+      border-radius: 999px;
+      font: inherit;
+      cursor: pointer;
+    }}
+    .lang-button.active {{
+      background: var(--card);
+      color: var(--ink);
+      box-shadow: 0 2px 10px rgba(67, 40, 20, 0.08);
     }}
     .meta {{
       margin-top: 12px;
@@ -639,7 +808,7 @@ def build_html(
       top: 0;
       background: var(--card);
     }}
-    td:nth-child(4), td:nth-child(5) {{
+    td:nth-child(3), td:nth-child(4) {{
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }}
@@ -654,6 +823,9 @@ def build_html(
       color: var(--muted);
     }}
     @media (max-width: 880px) {{
+      .hero-top {{
+        align-items: stretch;
+      }}
       .bar-row-header {{
         display: none;
       }}
@@ -689,12 +861,18 @@ def build_html(
 <body>
   <div class="wrap">
     <section class="hero">
-      <h1>Japanese mining report</h1>
-      <p>This report visualizes where your <code>{html.escape(note_type_name)}</code> cards came from while mining Japanese from different materials. It reads the <code>MiscInfo</code> field, which often stores the title, file name, timestamp, or URL of the sentence, word, or page you mined. The work/material grouping is heuristic: it tries to merge episode-level or chapter-level source names into a higher-level title, but entries with only partial names cannot always be merged perfectly.</p>
+      <div class="hero-top">
+        <h1>{title_html}</h1>
+        <div class="lang-toggle" role="group" aria-label="Language switch">
+          <button type="button" class="lang-button active" data-set-lang="en" aria-pressed="true">EN</button>
+          <button type="button" class="lang-button" data-set-lang="zh" aria-pressed="false">中文</button>
+        </div>
+      </div>
+      <p>{hero_intro}</p>
       <div class="meta">
-        <span class="chip">Note type: {html.escape(note_type_name)}</span>
-        <span class="chip">Deck filter: {html.escape(deck_scope)}</span>
-        <span class="chip">Generated: {html.escape(generated_at)}</span>
+        <span class="chip">{meta_note_type}</span>
+        <span class="chip">{meta_deck_scope}</span>
+        <span class="chip">{meta_generated_at}</span>
       </div>
     </section>
 
@@ -704,29 +882,37 @@ def build_html(
 
     <section class="grid">
       <article class="panel">
-        <h2>Top works / materials</h2>
-        <p>Best-effort grouping of mined cards into higher-level works or source materials based on the text stored in <code>MiscInfo</code>. Values are shown as studied/mined, with dark bars for studied cards and light bars for mined-but-not-yet-studied cards.</p>
+        <h2>{render_bilingual("Top works / materials", "主要作品 / 材料")}</h2>
+        <p>{works_intro}</p>
         {work_chart}
-        <p class="note">Useful for seeing which shows, novels, manga, visual novels, readers, or websites contributed the most cards to your Japanese mining. Not exact.</p>
+        <p class="note">{works_note}</p>
       </article>
 
       <article class="panel">
-        <h2>Top source entries</h2>
-        <p>Exact source strings from <code>MiscInfo</code> after stripping timestamps like <code>(2m21s)</code>. Values are shown as studied/mined, with dark bars for studied cards and light bars for mined-but-not-yet-studied cards.</p>
+        <h2>{render_bilingual("Top source entries", "主要来源条目")}</h2>
+        <p>{sources_intro}</p>
         {source_chart}
-        <p class="note">Useful when you want to see which exact episode, subtitle file, chapter, reader tab, page, or other mined source produced the most cards.</p>
+        <p class="note">{sources_note}</p>
       </article>
     </section>
 
     <section class="panel table-panel">
-      <h2>All source entries</h2>
-      <p>Filter the table below to inspect mined sources, grouped works/materials, and any stored site/domain metadata.</p>
+      <h2>{render_bilingual("All source entries", "全部来源条目")}</h2>
+      <p>{table_intro}</p>
       {table_html}
     </section>
   </div>
   <script>
+    const root = document.documentElement;
     const input = document.getElementById('sourceFilter');
     const rows = Array.from(document.querySelectorAll('#sourceTable tbody tr'));
+    const langButtons = Array.from(document.querySelectorAll('[data-set-lang]'));
+    const labelElements = Array.from(document.querySelectorAll('[data-label-en]'));
+    const placeholderElements = Array.from(document.querySelectorAll('[data-placeholder-en]'));
+    const titles = {{
+      en: 'Japanese Mining Report',
+      zh: '日语挖卡报告',
+    }};
 
     function filterRows() {{
       const query = input.value.trim().toLowerCase();
@@ -735,7 +921,53 @@ def build_html(
       }}
     }}
 
+    function applyLanguage(lang) {{
+      const nextLang = lang === 'zh' ? 'zh' : 'en';
+      root.dataset.lang = nextLang;
+      root.lang = nextLang;
+      document.title = titles[nextLang] || titles.en;
+
+      for (const element of placeholderElements) {{
+        const value = element.getAttribute(`data-placeholder-${{nextLang}}`);
+        if (value) {{
+          element.setAttribute('placeholder', value);
+        }}
+      }}
+
+      for (const element of labelElements) {{
+        const value = element.getAttribute(`data-label-${{nextLang}}`);
+        if (value) {{
+          element.setAttribute('data-label', value);
+        }}
+      }}
+
+      for (const button of langButtons) {{
+        const active = button.dataset.setLang === nextLang;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }}
+
+      try {{
+        localStorage.setItem('japanese-mining-report-lang', nextLang);
+      }} catch (error) {{
+        console.debug(error);
+      }}
+    }}
+
+    for (const button of langButtons) {{
+      button.addEventListener('click', () => applyLanguage(button.dataset.setLang));
+    }}
     input.addEventListener('input', filterRows);
+
+    let initialLang = 'en';
+    try {{
+      initialLang =
+        localStorage.getItem('japanese-mining-report-lang') ||
+        ((navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en');
+    }} catch (error) {{
+      console.debug(error);
+    }}
+    applyLanguage(initialLang);
   </script>
 </body>
 </html>
