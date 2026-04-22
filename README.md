@@ -2,7 +2,11 @@
 
 Small script for visualizing where your Anki `Lapis` cards came from while mining Japanese.
 
-It reads the `MiscInfo` field from your notes, groups mined cards by source and by higher-level work/material, and generates a local HTML report.
+It reads the `MiscInfo` field from your notes, groups mined cards by source and by higher-level work/material, and generates a local HTML report with English/Chinese UI switching.
+
+## Preview
+
+![English report preview](assets/report-preview-en.png)
 
 ## What It Shows
 
