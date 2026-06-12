@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import os
 import re
 import shutil
 import sqlite3
 import tempfile
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 BR_RE = re.compile(r"<br\s*/?>", flags=re.IGNORECASE)
@@ -23,6 +25,12 @@ URL_RE = re.compile(r"https?://\S+")
 
 @dataclass(frozen=True)
 class Record:
+    card_id: int
+    note_id: int
+    mined_at: datetime
+    mined_date: str
+    mined_week: str
+    mined_month: str
     source: str
     work: str
     domain: str
@@ -73,6 +81,20 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("output/lapis_source_report.html"),
         help="Output HTML report path. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--timeline-output",
+        type=Path,
+        default=Path("output/lapis_mining_timeline_report.html"),
+        help="Output HTML timeline report path. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--timezone",
+        default="",
+        help=(
+            "Timezone for grouping note creation dates, for example Asia/Shanghai. "
+            "Defaults to the system local timezone."
+        ),
     )
     return parser.parse_args()
 
@@ -226,30 +248,59 @@ def guess_work_label(source: str) -> str:
     return work or source
 
 
+def resolve_timezone(timezone_name: str):
+    timezone_name = timezone_name.strip()
+    if not timezone_name:
+        return datetime.now().astimezone().tzinfo
+
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as error:
+        raise SystemExit(f"Unknown timezone: {timezone_name}") from error
+
+
+def mined_datetime_from_note_id(note_id: int, time_zone) -> datetime:
+    return datetime.fromtimestamp(note_id / 1000, time_zone)
+
+
+def build_period_labels(mined_at: datetime) -> tuple[str, str, str]:
+    mined_day = mined_at.date()
+    iso_year, iso_week, _ = mined_day.isocalendar()
+    return (
+        mined_day.isoformat(),
+        f"{iso_year}-W{iso_week:02d}",
+        f"{mined_day.year}-{mined_day.month:02d}",
+    )
+
+
 def load_records(
     conn: sqlite3.Connection,
     note_type_id: int,
     field_ord: int,
     deck_contains: str,
+    time_zone,
 ) -> list[Record]:
     deck_filter = deck_contains.casefold().strip()
     records: list[Record] = []
 
     rows = conn.execute(
         """
-        select c.id, d.name, n.flds, c.reps
+        select c.id, n.id, d.name, n.flds, c.reps
         from cards c
         join notes n on n.id = c.nid
         join decks d on d.id = c.did
         where n.mid=?
+        order by n.id, c.id
         """,
         (note_type_id,),
     )
 
-    for _, deck_name, flds, reps in rows:
+    for card_id, note_id, deck_name, flds, reps in rows:
         if deck_filter and deck_filter not in deck_name.casefold():
             continue
 
+        mined_at = mined_datetime_from_note_id(int(note_id), time_zone)
+        mined_date, mined_week, mined_month = build_period_labels(mined_at)
         fields = flds.split("\x1f")
         raw_misc = fields[field_ord] if len(fields) > field_ord else ""
         lines = strip_misc_html(raw_misc)
@@ -259,6 +310,12 @@ def load_records(
 
         records.append(
             Record(
+                card_id=int(card_id),
+                note_id=int(note_id),
+                mined_at=mined_at,
+                mined_date=mined_date,
+                mined_week=mined_week,
+                mined_month=mined_month,
                 source=source,
                 work=guess_work_label(source),
                 domain=domain,
@@ -291,6 +348,96 @@ def build_progress_rows(
         (label, total, studied_counts[label])
         for label, total in total_counts.most_common(top_n)
     ]
+
+
+def unique_note_records(records: list[Record]) -> list[Record]:
+    seen_note_ids: set[int] = set()
+    unique_records: list[Record] = []
+    for record in records:
+        if record.note_id in seen_note_ids:
+            continue
+        seen_note_ids.add(record.note_id)
+        unique_records.append(record)
+    return unique_records
+
+
+def aggregate_timeline_counts(
+    records: list[Record], period: str, source_grain: str
+) -> list[tuple[str, int, list[tuple[str, int]]]]:
+    period_attrs = {
+        "day": "mined_date",
+        "week": "mined_week",
+        "month": "mined_month",
+    }
+    source_attrs = {
+        "work": "work",
+        "source": "source",
+    }
+    period_attr = period_attrs[period]
+    source_attr = source_attrs[source_grain]
+    buckets: dict[str, Counter[str]] = defaultdict(Counter)
+
+    for record in records:
+        buckets[getattr(record, period_attr)][getattr(record, source_attr)] += 1
+
+    return [
+        (period_label, sum(counter.values()), counter.most_common())
+        for period_label, counter in sorted(buckets.items())
+    ]
+
+
+def timeline_summary(records: list[Record]) -> dict[str, object]:
+    if not records:
+        return {
+            "totalWords": 0,
+            "activeDays": 0,
+            "dateStart": "",
+            "dateEnd": "",
+            "averagePerActiveDay": 0,
+            "maxDay": "",
+            "maxDayWords": 0,
+        }
+
+    daily_rows = aggregate_timeline_counts(records, "day", "work")
+    max_day, max_day_words, _ = max(daily_rows, key=lambda row: row[1])
+    total_words = len(records)
+    active_days = len(daily_rows)
+    dates = [record.mined_date for record in records]
+    return {
+        "totalWords": total_words,
+        "activeDays": active_days,
+        "dateStart": min(dates),
+        "dateEnd": max(dates),
+        "averagePerActiveDay": total_words / active_days if active_days else 0,
+        "maxDay": max_day,
+        "maxDayWords": max_day_words,
+    }
+
+
+def build_timeline_payload(records: list[Record], time_zone_label: str) -> dict[str, object]:
+    timeline_records = unique_note_records(records)
+    return {
+        "timezone": time_zone_label,
+        "summary": timeline_summary(timeline_records),
+        "records": [
+            {
+                "date": record.mined_date,
+                "week": record.mined_week,
+                "month": record.mined_month,
+                "work": record.work,
+                "source": record.source,
+            }
+            for record in timeline_records
+        ],
+    }
+
+
+def safe_json_script(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
+
+
+def timezone_display_name(time_zone) -> str:
+    return str(getattr(time_zone, "key", None) or time_zone)
 
 
 def render_bilingual(en: str, zh: str, *, escape_text: bool = True) -> str:
@@ -440,6 +587,901 @@ def render_table(records: list[Record], total_cards: int) -> str:
             "</table>",
         ]
     )
+
+
+def render_timeline_html(
+    records: list[Record],
+    note_type_name: str,
+    deck_contains: str,
+    time_zone_label: str,
+) -> str:
+    payload = build_timeline_payload(records, time_zone_label)
+    summary = payload["summary"]
+    total_words = int(summary["totalWords"])
+    active_days = int(summary["activeDays"])
+    average_per_active_day = float(summary["averagePerActiveDay"])
+    max_day = str(summary["maxDay"])
+    max_day_words = int(summary["maxDayWords"])
+    date_start = str(summary["dateStart"])
+    date_end = str(summary["dateEnd"])
+    generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    deck_scope_en = deck_contains or "(all decks with matching note type)"
+    deck_scope_zh = deck_contains or "（匹配该笔记类型的全部牌组）"
+    note_type_escaped = html.escape(note_type_name)
+    data_json = safe_json_script(payload)
+
+    summary_cards = "\n".join(
+        [
+            render_summary_card("Mined words", "挖词数", f"{total_words:,}"),
+            render_summary_card("Active mining days", "挖词天数", f"{active_days:,}"),
+            render_summary_card(
+                "Average / active day",
+                "活跃日均",
+                f"{average_per_active_day:.1f}",
+            ),
+            render_summary_card(
+                "Best day",
+                "最高单日",
+                f"{max_day_words:,} · {html.escape(max_day)}",
+            ),
+            render_summary_card("Date range", "日期范围", f"{date_start} - {date_end}"),
+        ]
+    )
+
+    css = """
+    :root {
+      --bg: #f5f1e9;
+      --card: #fffdf8;
+      --ink: #1c1f22;
+      --muted: #656d72;
+      --line: #d9d2c7;
+      --accent: #2f7f77;
+      --accent-strong: #155d59;
+      --accent-soft: #d7ece7;
+      --warm: #c7793f;
+      --bar-bg: #ebe4d8;
+    }
+    html[data-lang="en"] .lang-zh {
+      display: none;
+    }
+    html[data-lang="zh"] .lang-en {
+      display: none;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font-family: "Iowan Old Style", "Palatino Linotype", "Noto Serif CJK SC", serif;
+      background: linear-gradient(180deg, #fbf7ee 0%, var(--bg) 42%, #eef4f2 100%);
+      color: var(--ink);
+    }
+    .wrap {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    h1, h2 {
+      margin: 0 0 12px;
+      line-height: 1.1;
+      font-weight: 700;
+    }
+    h1 {
+      font-size: clamp(2rem, 3vw, 3rem);
+    }
+    h2 {
+      font-size: 1.25rem;
+    }
+    p {
+      margin: 0 0 14px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .hero,
+    .panel,
+    .summary-card {
+      background: rgba(255, 253, 248, 0.9);
+      border: 1px solid var(--line);
+      box-shadow: 0 12px 30px rgba(28, 31, 34, 0.05);
+    }
+    .hero {
+      padding: 24px;
+      border-radius: 18px;
+    }
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .link-button,
+    .lang-toggle {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--line);
+      background: #f1eadf;
+      border-radius: 999px;
+    }
+    .link-button {
+      min-height: 38px;
+      padding: 0 14px;
+      color: var(--accent-strong);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .lang-toggle {
+      gap: 4px;
+      padding: 4px;
+    }
+    .lang-button,
+    .segmented-button {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 10px;
+      border-radius: 999px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .lang-button.active,
+    .segmented-button.active {
+      background: var(--card);
+      color: var(--ink);
+      box-shadow: 0 2px 10px rgba(28, 31, 34, 0.08);
+    }
+    .meta {
+      margin-top: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    .chip {
+      background: #f1eadf;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 12px;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin: 20px 0;
+    }
+    .summary-card {
+      border-radius: 14px;
+      padding: 18px;
+      min-height: 106px;
+    }
+    .summary-value {
+      font-size: 1.55rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+      overflow-wrap: anywhere;
+    }
+    .summary-label {
+      color: var(--muted);
+    }
+    .panel {
+      border-radius: 14px;
+      padding: 20px;
+      margin-top: 18px;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+    .control-label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.84rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .segmented {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      background: #f1eadf;
+      border-radius: 999px;
+    }
+    input[type="search"] {
+      width: 100%;
+      min-height: 42px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fffdf9;
+      font: inherit;
+    }
+    .chart-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+    .chart-host {
+      margin-top: 8px;
+    }
+    .axis-chart {
+      --plot-height: 190px;
+      --label-height: 72px;
+      display: grid;
+      grid-template-columns: 20px 42px minmax(0, 1fr);
+      grid-template-rows: auto auto;
+      column-gap: 8px;
+      align-items: start;
+    }
+    .y-axis-title {
+      grid-column: 1;
+      grid-row: 1;
+      height: calc(8px + var(--plot-height));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      white-space: nowrap;
+    }
+    .y-axis-ticks {
+      grid-column: 2;
+      grid-row: 1;
+      height: calc(8px + var(--plot-height) + var(--label-height));
+      position: relative;
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .y-tick {
+      position: absolute;
+      right: 0;
+      transform: translateY(-50%);
+      white-space: nowrap;
+    }
+    .y-tick-top {
+      top: 8px;
+    }
+    .y-tick-mid {
+      top: calc(8px + (var(--plot-height) / 2));
+    }
+    .y-tick-bottom {
+      top: calc(8px + var(--plot-height));
+    }
+    .chart-scroll {
+      grid-column: 3;
+      grid-row: 1;
+      overflow-x: auto;
+      padding: 8px 0 4px;
+    }
+    .x-axis-title {
+      grid-column: 3;
+      grid-row: 2;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+      text-align: center;
+      margin-top: 4px;
+    }
+    .column-chart {
+      display: flex;
+      align-items: stretch;
+      gap: 4px;
+      min-width: max(100%, calc(var(--bar-count) * 10px));
+      min-height: calc(var(--plot-height) + var(--label-height));
+      position: relative;
+      padding: 8px 2px 0;
+    }
+    .column-chart::after {
+      content: "";
+      position: absolute;
+      left: 2px;
+      right: 2px;
+      top: calc(8px + var(--plot-height));
+      border-bottom: 1px solid var(--line);
+      pointer-events: none;
+    }
+    .time-column {
+      flex: 1 0 8px;
+      min-width: 8px;
+      display: grid;
+      grid-template-rows: var(--plot-height) var(--label-height);
+      align-items: center;
+      gap: 0;
+      overflow: visible;
+    }
+    .time-bar-slot {
+      width: 100%;
+      height: var(--plot-height);
+      display: flex;
+      align-items: flex-end;
+      position: relative;
+      z-index: 1;
+    }
+    .stack-bar {
+      width: 100%;
+      min-height: 2px;
+      border-radius: 4px 4px 0 0;
+      overflow: hidden;
+    }
+    .stack-bar {
+      display: flex;
+      flex-direction: column-reverse;
+      background: var(--bar-bg);
+      border: 1px solid #e0d8cb;
+    }
+    .stack-segment {
+      width: 100%;
+      min-height: 1px;
+      cursor: help;
+    }
+    .stack-segment:hover {
+      filter: brightness(1.12);
+    }
+    .time-label {
+      width: 100%;
+      height: var(--label-height);
+      position: relative;
+      color: var(--muted);
+      font-size: 0.72rem;
+      overflow: visible;
+      padding-top: 8px;
+    }
+    .time-label-text {
+      display: block;
+      position: absolute;
+      top: 14px;
+      left: 50%;
+      width: max-content;
+      white-space: nowrap;
+      line-height: 1;
+      transform: rotate(45deg);
+      transform-origin: top left;
+      font-variant-numeric: tabular-nums;
+    }
+    .chart-tooltip {
+      position: fixed;
+      z-index: 50;
+      max-width: min(420px, calc(100vw - 24px));
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 253, 248, 0.98);
+      box-shadow: 0 10px 26px rgba(28, 31, 34, 0.14);
+      color: var(--ink);
+      font-size: 0.9rem;
+      line-height: 1.45;
+      white-space: pre-line;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transform: translate(-9999px, -9999px);
+    }
+    .chart-tooltip.visible {
+      opacity: 1;
+      visibility: visible;
+    }
+    .table-toolbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      color: var(--muted);
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.95rem;
+    }
+    th, td {
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      background: var(--card);
+      white-space: nowrap;
+    }
+    td:nth-child(1),
+    td:nth-child(2) {
+      white-space: nowrap;
+    }
+    td:nth-child(2) {
+      font-variant-numeric: tabular-nums;
+    }
+    .detail-list {
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    @media (max-width: 960px) {
+      .controls,
+      .chart-grid {
+        grid-template-columns: 1fr;
+      }
+      .axis-chart {
+        grid-template-columns: 16px 36px minmax(0, 1fr);
+        column-gap: 6px;
+      }
+      .actions {
+        justify-content: flex-start;
+      }
+      table, thead, tbody, th, td, tr {
+        display: block;
+      }
+      thead {
+        display: none;
+      }
+      tr {
+        padding: 12px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      td {
+        border-bottom: none;
+        padding: 4px 0;
+      }
+      td::before {
+        content: attr(data-label);
+        display: block;
+        color: var(--muted);
+        font-size: 0.84rem;
+      }
+    }
+    """
+
+    js = """
+    const reportData = JSON.parse(document.getElementById('timeline-data').textContent);
+    const root = document.documentElement;
+    const langButtons = Array.from(document.querySelectorAll('[data-set-lang]'));
+    const periodButtons = Array.from(document.querySelectorAll('[data-period]'));
+    const grainButtons = Array.from(document.querySelectorAll('[data-grain]'));
+    const filterInput = document.getElementById('sourceFilter');
+    const stackChart = document.getElementById('stackChart');
+    const tableBody = document.getElementById('timelineTableBody');
+    const resultCount = document.getElementById('resultCount');
+    const hoverTooltip = document.createElement('div');
+    hoverTooltip.className = 'chart-tooltip';
+    document.body.appendChild(hoverTooltip);
+    const titles = {
+      en: 'Japanese Mining Timeline',
+      zh: '日语挖词时间线',
+    };
+    const text = {
+      en: {
+        noData: 'No matching data.',
+        periods: 'periods',
+        period: 'Period',
+        words: 'Words',
+        details: 'Source details',
+        xDate: 'Date',
+        xWeek: 'Week',
+        xMonth: 'Month',
+        yStackedWords: 'Words by source',
+      },
+      zh: {
+        noData: '没有匹配数据。',
+        periods: '个时间段',
+        period: '时间段',
+        words: '词数',
+        details: '来源明细',
+        xDate: '日期',
+        xWeek: '周',
+        xMonth: '月份',
+        yStackedWords: '按来源堆叠的挖词数',
+      },
+    };
+    const colors = [
+      '#2f7f77', '#c7793f', '#516da8', '#9d5a8f', '#5f8f3e', '#b8524e',
+      '#3d8aa6', '#b08d32', '#7466a6', '#4f7d52', '#a75f32', '#597e9f',
+      '#8e6a40', '#6f8c7b', '#a05f70',
+    ];
+    const state = {
+      lang: 'en',
+      period: 'day',
+      grain: 'work',
+      query: '',
+    };
+
+    function t(key) {
+      return (text[state.lang] || text.en)[key] || text.en[key] || key;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value).replaceAll('\\n', '&#10;');
+    }
+
+    function showTooltip(event, text) {
+      hoverTooltip.textContent = text;
+      hoverTooltip.classList.add('visible');
+      moveTooltip(event);
+    }
+
+    function moveTooltip(event) {
+      if (!hoverTooltip.textContent) return;
+      const margin = 12;
+      const rect = hoverTooltip.getBoundingClientRect();
+      let left = event.clientX + margin;
+      let top = event.clientY + margin;
+      if (left + rect.width > window.innerWidth - margin) {
+        left = event.clientX - rect.width - margin;
+      }
+      if (top + rect.height > window.innerHeight - margin) {
+        top = event.clientY - rect.height - margin;
+      }
+      hoverTooltip.style.transform =
+        `translate(${Math.max(margin, left)}px, ${Math.max(margin, top)}px)`;
+    }
+
+    function hideTooltip() {
+      hoverTooltip.textContent = '';
+      hoverTooltip.classList.remove('visible');
+      hoverTooltip.style.transform = 'translate(-9999px, -9999px)';
+    }
+
+    function periodKey() {
+      if (state.period === 'week') return 'week';
+      if (state.period === 'month') return 'month';
+      return 'date';
+    }
+
+    function sourceKey() {
+      return state.grain === 'source' ? 'source' : 'work';
+    }
+
+    function filteredRecords() {
+      const key = sourceKey();
+      const query = state.query.trim().toLowerCase();
+      if (!query) return reportData.records;
+      return reportData.records.filter((record) =>
+        String(record[key]).toLowerCase().includes(query)
+      );
+    }
+
+    function increment(map, key, value = 1) {
+      map.set(key, (map.get(key) || 0) + value);
+    }
+
+    function buildGroups(records) {
+      const pKey = periodKey();
+      const sKey = sourceKey();
+      const buckets = new Map();
+      const sourceTotals = new Map();
+
+      for (const record of records) {
+        const period = record[pKey];
+        const source = record[sKey] || '(empty)';
+        if (!buckets.has(period)) buckets.set(period, new Map());
+        increment(buckets.get(period), source);
+        increment(sourceTotals, source);
+      }
+
+      const periods = Array.from(buckets.entries())
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([period, counter]) => {
+          const total = Array.from(counter.values()).reduce((sum, value) => sum + value, 0);
+          return { period, counter, total };
+        });
+      const sources = Array.from(sourceTotals.entries())
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+      return { periods, sources };
+    }
+
+    function sourceLabels(sources) {
+      return sources.map(([label]) => label);
+    }
+
+    function maybePeriodLabel(index, total, label) {
+      const every = Math.max(1, Math.ceil(total / 12));
+      return index % every === 0 || index === total - 1 ? label : '';
+    }
+
+    function formatTick(value) {
+      return Math.round(value).toLocaleString();
+    }
+
+    function xAxisLabel() {
+      if (state.period === 'week') return t('xWeek');
+      if (state.period === 'month') return t('xMonth');
+      return t('xDate');
+    }
+
+    function renderAxisChart(max, yLabel, chartHtml) {
+      const mid = max / 2;
+      return `
+        <div class="axis-chart">
+          <div class="y-axis-title">${escapeHtml(yLabel)}</div>
+          <div class="y-axis-ticks" aria-hidden="true">
+            <span class="y-tick y-tick-top">${formatTick(max)}</span>
+            <span class="y-tick y-tick-mid">${formatTick(mid)}</span>
+            <span class="y-tick y-tick-bottom">0</span>
+          </div>
+          <div class="chart-scroll">${chartHtml}</div>
+          <div class="x-axis-title">${escapeHtml(xAxisLabel())}</div>
+        </div>
+      `;
+    }
+
+    function renderStackChart(periods, sourceLabels) {
+      if (!periods.length) {
+        stackChart.innerHTML = `<p class="muted">${escapeHtml(t('noData'))}</p>`;
+        hideTooltip();
+        return;
+      }
+      const max = Math.max(...periods.map((period) => period.total), 1);
+      const colorBySource = new Map(
+        sourceLabels.map((label, index) => [label, colors[index % colors.length]])
+      );
+      const chartHtml = `
+        <div class="column-chart" style="--bar-count:${periods.length}">
+          ${periods.map((period, index) => {
+            const height = Math.max((period.total / max) * 100, 2);
+            const pieces = sourceLabels
+              .map((label) => ({
+                label,
+                count: period.counter.get(label) || 0,
+                color: colorBySource.get(label),
+              }))
+              .filter((piece) => piece.count > 0);
+            const label = maybePeriodLabel(index, periods.length, period.period);
+            return `
+              <div class="time-column">
+                <div class="time-bar-slot">
+                  <div class="stack-bar" style="height:${height.toFixed(2)}%">
+                    ${pieces.map((piece) => {
+                      const segmentHeight = Math.max((piece.count / period.total) * 100, 1);
+                      const share = ((piece.count / period.total) * 100).toFixed(1);
+                      const segmentTooltip = `${period.period}\\n${piece.label}\\n${piece.count.toLocaleString()} / ${period.total.toLocaleString()} (${share}%)`;
+                      return `<div class="stack-segment" data-tooltip="${escapeAttr(segmentTooltip)}" title="${escapeAttr(segmentTooltip)}" style="height:${segmentHeight.toFixed(2)}%; background:${piece.color}"></div>`;
+                    }).join('')}
+                  </div>
+                </div>
+                <div class="time-label"><span class="time-label-text">${escapeHtml(label)}</span></div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+      stackChart.innerHTML = renderAxisChart(max, t('yStackedWords'), chartHtml);
+      hideTooltip();
+    }
+
+    function renderTable(periods) {
+      if (!periods.length) {
+        tableBody.innerHTML = `
+          <tr><td colspan="3" class="muted">${escapeHtml(t('noData'))}</td></tr>
+        `;
+        return;
+      }
+      tableBody.innerHTML = periods.map((period) => {
+        const sources = Array.from(period.counter.entries());
+        const details = sources
+          .map(([label, count]) => `${label}: ${count.toLocaleString()}`)
+          .map(escapeHtml)
+          .join('<br>');
+        return `
+          <tr>
+            <td data-label="${escapeHtml(t('period'))}" data-label-en="Period" data-label-zh="时间段">${escapeHtml(period.period)}</td>
+            <td data-label="${escapeHtml(t('words'))}" data-label-en="Words" data-label-zh="词数">${period.total.toLocaleString()}</td>
+            <td data-label="${escapeHtml(t('details'))}" data-label-en="Source details" data-label-zh="来源明细"><span class="detail-list">${details}</span></td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function updateLocalizableAttrs() {
+      for (const element of document.querySelectorAll('[data-label-en]')) {
+        const value = element.getAttribute(`data-label-${state.lang}`);
+        if (value) element.setAttribute('data-label', value);
+      }
+      for (const element of document.querySelectorAll('[data-placeholder-en]')) {
+        const value = element.getAttribute(`data-placeholder-${state.lang}`);
+        if (value) element.setAttribute('placeholder', value);
+      }
+    }
+
+    function render() {
+      const records = filteredRecords();
+      const { periods, sources } = buildGroups(records);
+      renderStackChart(periods, sourceLabels(sources));
+      renderTable(periods);
+      resultCount.textContent = `${periods.length.toLocaleString()} ${t('periods')}`;
+      updateLocalizableAttrs();
+    }
+
+    function applyLanguage(lang) {
+      state.lang = lang === 'zh' ? 'zh' : 'en';
+      root.dataset.lang = state.lang;
+      root.lang = state.lang;
+      document.title = titles[state.lang] || titles.en;
+      for (const button of langButtons) {
+        const active = button.dataset.setLang === state.lang;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }
+      try {
+        localStorage.setItem('japanese-mining-report-lang', state.lang);
+      } catch (error) {
+        console.debug(error);
+      }
+      render();
+    }
+
+    for (const button of langButtons) {
+      button.addEventListener('click', () => applyLanguage(button.dataset.setLang));
+    }
+    for (const button of periodButtons) {
+      button.addEventListener('click', () => {
+        state.period = button.dataset.period;
+        periodButtons.forEach((item) => item.classList.toggle('active', item === button));
+        render();
+      });
+    }
+    for (const button of grainButtons) {
+      button.addEventListener('click', () => {
+        state.grain = button.dataset.grain;
+        grainButtons.forEach((item) => item.classList.toggle('active', item === button));
+        render();
+      });
+    }
+    filterInput.addEventListener('input', () => {
+      state.query = filterInput.value;
+      render();
+    });
+    stackChart.addEventListener('mouseover', (event) => {
+      const segment = event.target.closest('.stack-segment');
+      if (!segment || !stackChart.contains(segment)) return;
+      showTooltip(event, segment.dataset.tooltip || '');
+    });
+    stackChart.addEventListener('mousemove', (event) => {
+      if (event.target.closest('.stack-segment')) {
+        moveTooltip(event);
+      }
+    });
+    stackChart.addEventListener('mouseout', (event) => {
+      const segment = event.target.closest('.stack-segment');
+      if (!segment || segment.contains(event.relatedTarget)) return;
+      hideTooltip();
+    });
+
+    let initialLang = 'en';
+    try {
+      initialLang =
+        localStorage.getItem('japanese-mining-report-lang') ||
+        ((navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en');
+    } catch (error) {
+      console.debug(error);
+    }
+    applyLanguage(initialLang);
+    """
+
+    return f"""<!DOCTYPE html>
+<html lang="en" data-lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Japanese Mining Timeline</title>
+  <style>{css}</style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="hero-top">
+        <h1>{render_bilingual("Japanese mining timeline", "日语挖词时间线")}</h1>
+        <div class="actions">
+          <a class="link-button" href="lapis_source_report.html">
+            {render_bilingual("Source report", "来源报告")}
+          </a>
+          <div class="lang-toggle" role="group" aria-label="Language switch">
+            <button type="button" class="lang-button active" data-set-lang="en" aria-pressed="true">EN</button>
+            <button type="button" class="lang-button" data-set-lang="zh" aria-pressed="false">中文</button>
+          </div>
+        </div>
+      </div>
+      <p>{render_bilingual(
+          "This page groups mined Lapis notes by creation date and source, so one note counts as one mined word.",
+          "这个页面按 Lapis 笔记创建日期和来源统计挖词情况，一条笔记算一个挖词。"
+      )}</p>
+      <div class="meta">
+        <span class="chip">{render_bilingual(f"Note type: {note_type_escaped}", f"笔记类型：{note_type_escaped}", escape_text=False)}</span>
+        <span class="chip">{render_bilingual(f"Deck filter: {html.escape(deck_scope_en)}", f"牌组筛选：{html.escape(deck_scope_zh)}", escape_text=False)}</span>
+        <span class="chip">{render_bilingual(f"Timezone: {html.escape(time_zone_label)}", f"时区：{html.escape(time_zone_label)}", escape_text=False)}</span>
+        <span class="chip">{render_bilingual(f"Generated: {html.escape(generated_at)}", f"生成时间：{html.escape(generated_at)}", escape_text=False)}</span>
+      </div>
+    </section>
+
+    <section class="summary">
+      {summary_cards}
+    </section>
+
+    <section class="panel">
+      <h2>{render_bilingual("Controls", "控制")}</h2>
+      <div class="controls">
+        <div>
+          <span class="control-label">{render_bilingual("Time grain", "时间粒度")}</span>
+          <span class="segmented" role="group" aria-label="Time grain">
+            <button type="button" class="segmented-button active" data-period="day">{render_bilingual("Day", "日")}</button>
+            <button type="button" class="segmented-button" data-period="week">{render_bilingual("Week", "周")}</button>
+            <button type="button" class="segmented-button" data-period="month">{render_bilingual("Month", "月")}</button>
+          </span>
+        </div>
+        <div>
+          <span class="control-label">{render_bilingual("Source grain", "来源粒度")}</span>
+          <span class="segmented" role="group" aria-label="Source grain">
+            <button type="button" class="segmented-button active" data-grain="work">{render_bilingual("Work / material", "作品 / 材料")}</button>
+            <button type="button" class="segmented-button" data-grain="source">{render_bilingual("Exact source", "原始来源")}</button>
+          </span>
+        </div>
+        <label for="sourceFilter">
+          <span class="control-label">{render_bilingual("Filter source", "筛选来源")}</span>
+          <input id="sourceFilter" type="search"
+            placeholder="Filter current source grain"
+            data-placeholder-en="Filter current source grain"
+            data-placeholder-zh="筛选当前来源粒度">
+        </label>
+      </div>
+    </section>
+
+    <section class="chart-grid">
+      <article class="panel">
+        <h2>{render_bilingual("Source mix over time", "来源构成随时间变化")}</h2>
+        <div id="stackChart" class="chart-host"></div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="table-toolbar">
+        <h2>{render_bilingual("Timeline details", "时间线明细")}</h2>
+        <span id="resultCount"></span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>{render_bilingual("Period", "时间段")}</th>
+            <th>{render_bilingual("Words", "词数")}</th>
+            <th>{render_bilingual("Source details", "来源明细")}</th>
+          </tr>
+        </thead>
+        <tbody id="timelineTableBody"></tbody>
+      </table>
+    </section>
+  </div>
+  <script id="timeline-data" type="application/json">{data_json}</script>
+  <script>{js}</script>
+</body>
+</html>
+"""
 
 
 def build_html(
@@ -987,6 +2029,7 @@ def build_html(
 def main() -> int:
     args = parse_args()
     db_path = resolve_db_path(args.db)
+    time_zone = resolve_timezone(args.timezone)
     snapshot_dir, snapshot_db = make_db_snapshot(db_path)
     conn: sqlite3.Connection | None = None
     try:
@@ -995,12 +2038,15 @@ def main() -> int:
 
         note_type_id = find_note_type_id(conn, args.note_type)
         field_ord = find_field_ord(conn, note_type_id, args.field)
-        records = load_records(conn, note_type_id, field_ord, args.deck_contains)
+        records = load_records(
+            conn, note_type_id, field_ord, args.deck_contains, time_zone
+        )
 
         if not records:
             raise SystemExit("No matching cards found.")
 
         output_path = args.output.resolve()
+        timeline_output_path = args.timeline_output.resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             build_html(
@@ -1011,12 +2057,26 @@ def main() -> int:
             ),
             encoding="utf-8",
         )
+        timeline_output_path.parent.mkdir(parents=True, exist_ok=True)
+        timeline_output_path.write_text(
+            render_timeline_html(
+                records=records,
+                note_type_name=args.note_type,
+                deck_contains=args.deck_contains,
+                time_zone_label=timezone_display_name(time_zone),
+            ),
+            encoding="utf-8",
+        )
     finally:
         if conn is not None:
             conn.close()
         snapshot_dir.cleanup()
 
     print(f"Wrote {len(records):,} cards to {output_path}")
+    print(
+        f"Wrote {len(unique_note_records(records)):,} mined notes to "
+        f"{timeline_output_path}"
+    )
     return 0
 
 

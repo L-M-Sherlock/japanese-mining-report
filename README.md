@@ -4,6 +4,8 @@ Small script for visualizing where your Anki `Lapis` cards came from while minin
 
 It reads the `MiscInfo` field from your notes, groups mined cards by source and by higher-level work/material, and generates a local HTML report with English/Chinese UI switching.
 
+It also generates a separate mining timeline report that groups mined words by note creation date and lets you switch between daily/weekly/monthly views and work/source grouping.
+
 ## Preview
 
 ![English report preview](assets/report-preview-en.png)
@@ -25,6 +27,8 @@ uv sync
 - Top works / materials
 - Top source entries
 - Full source table with filtering
+- Daily / weekly / monthly mining timeline
+- Source mix over time by work/material or exact source
 
 For the two top charts:
 
@@ -86,7 +90,9 @@ uv run scripts/visualize_lapis_sources.py \
   --field MiscInfo \
   --deck-contains 日本語 \
   --top 30 \
-  --output output/lapis_source_report.html
+  --output output/lapis_source_report.html \
+  --timeline-output output/lapis_mining_timeline_report.html \
+  --timezone Asia/Shanghai
 ```
 
 - `--db`: explicit path to the Anki collection database
@@ -96,6 +102,10 @@ uv run scripts/visualize_lapis_sources.py \
 - `--deck-contains`: optional deck-name substring filter
 - `--top`: number of rows shown in the top charts
 - `--output`: output HTML path
+- `--timeline-output`: output HTML path for the mining timeline report
+- `--timezone`: timezone used to group note creation dates, default system local timezone
+
+The timeline report counts unique notes, not review events. For the default `Lapis` setup, one note corresponds to one mined word. Dates come from Anki note IDs, which are creation timestamps in milliseconds.
 
 ## Files in This Directory
 
@@ -106,5 +116,6 @@ uv run scripts/visualize_lapis_sources.py \
 - [scripts/visualize_lapis_sources.py](scripts/visualize_lapis_sources.py): main script
 - [output/](output): generated outputs
 - [output/lapis_source_report.html](output/lapis_source_report.html): latest generated report
+- [output/lapis_mining_timeline_report.html](output/lapis_mining_timeline_report.html): latest generated mining timeline report
 
 Generated files under `output/` and the local `.venv/` are ignored by git.
