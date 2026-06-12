@@ -2,13 +2,20 @@
 
 Small script for visualizing where your Anki `Lapis` cards came from while mining Japanese.
 
-It reads the `MiscInfo` field from your notes, groups mined cards by source and by higher-level work/material, and generates a local HTML report with English/Chinese UI switching.
+It reads the `MiscInfo` field from your notes and generates two local HTML reports with English/Chinese UI switching:
 
-It also generates a separate mining timeline report that groups mined words by note creation date and lets you switch between daily/weekly/monthly views and work/source grouping.
+- Source report: groups mined cards by source and higher-level work/material, and shows learning status such as studied cards and studied/mined percentages.
+- Timeline report: groups mined words by note creation time and source, focusing only on mining/card-creation activity rather than study or review progress.
 
 ## Preview
 
+### Source Report
+
 ![English report preview](assets/report-preview-en.png)
+
+### Timeline Report
+
+![English timeline report preview](assets/timeline-report-preview-en.png)
 
 ## Project Setup
 
@@ -22,19 +29,31 @@ uv sync
 
 ## What It Shows
 
-- Total mined cards
-- Studied cards
-- Top works / materials
-- Top source entries
-- Full source table with filtering
-- Daily / weekly / monthly mining timeline
-- Source mix over time by work/material or exact source
+### Source Report
 
-For the two top charts:
+The source report is written to `output/lapis_source_report.html`. It answers where your mined cards came from and how much of that mined material has been studied.
+
+- Total mined cards
+- Studied cards and studied percentage
+- Top works / materials, with studied/mined progress
+- Top exact source entries, with studied/mined progress
+- Full source table with filtering
+
+For the source report top charts:
 
 - Dark bar segment: studied cards
 - Light bar segment: mined but not yet studied cards
 - Right-side value: `studied/mined`
+
+### Timeline Report
+
+The timeline report is written to `output/lapis_mining_timeline_report.html`. It answers when you mined words and which sources they came from. It does **not** use review history or study status.
+
+- Total mined words, active mining days, active-day average, best day, and date range
+- Daily / weekly / monthly mining timeline
+- Source mix over time by work/material or exact source
+- Timeline details table grouped by period, with source details shown line by line
+- Hover/focus explanations for summary metrics and chart segments
 
 ## Safety
 
@@ -104,9 +123,9 @@ uv run scripts/visualize_lapis_sources.py \
 - `--output`: output HTML path
 - `--timeline-output`: output HTML path for the mining timeline report
 - `--timezone`: timezone used to group note creation dates, default system local timezone
-- `--day-start-hour`: optional override for the hour when a mining day starts; by default this follows Anki's collection rollover setting
+- `--day-start-hour`: optional override for the hour when a mining day starts; by default this follows Anki's collection rollover setting, falling back to `4` if unavailable
 
-The timeline report counts unique notes, not review events. For the default `Lapis` setup, one note corresponds to one mined word. Dates come from Anki note IDs, which are creation timestamps in milliseconds. Notes created before Anki's rollover hour are counted toward the previous mining day.
+The timeline report counts unique notes, not review events. For the default `Lapis` setup, one note corresponds to one mined word. Dates come from Anki note IDs, which are creation timestamps in milliseconds. Notes created before Anki's rollover hour are counted toward the previous mining day. Learning status is intentionally left to the source report.
 
 ## Files in This Directory
 
