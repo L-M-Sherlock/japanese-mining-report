@@ -576,9 +576,25 @@ def render_bar_rows(
     return "\n".join(pieces)
 
 
-def render_summary_card(label_en: str, label_zh: str, value: str) -> str:
+def render_summary_card(
+    label_en: str,
+    label_zh: str,
+    value: str,
+    tip_en: str = "",
+    tip_zh: str = "",
+) -> str:
+    attrs = ""
+    if tip_en or tip_zh:
+        tip_en = tip_en or tip_zh
+        tip_zh = tip_zh or tip_en
+        attrs = (
+            f" data-tip-en='{html.escape(tip_en, quote=True)}'"
+            f" data-tip-zh='{html.escape(tip_zh, quote=True)}'"
+            f" title='{html.escape(f'{tip_en} / {tip_zh}', quote=True)}'"
+            " tabindex='0'"
+        )
     return (
-        "<div class='summary-card'>"
+        f"<div class='summary-card'{attrs}>"
         f"<div class='summary-value'>{html.escape(value)}</div>"
         f"<div class='summary-label'>{render_bilingual(label_en, label_zh)}</div>"
         "</div>"
@@ -675,19 +691,41 @@ def render_timeline_html(
 
     summary_cards = "\n".join(
         [
-            render_summary_card("Mined words", "挖词数", f"{total_words:,}"),
-            render_summary_card("Active mining days", "挖词天数", f"{active_days:,}"),
+            render_summary_card(
+                "Mined words",
+                "挖词数",
+                f"{total_words:,}",
+                "Unique Lapis notes in the current filters. One note counts as one mined word.",
+                "当前筛选范围内的唯一 Lapis 笔记数。一条笔记算一个挖词。",
+            ),
+            render_summary_card(
+                "Active mining days",
+                "挖词天数",
+                f"{active_days:,}",
+                "Number of mining days with at least one mined word. The day boundary follows Anki's rollover setting.",
+                "至少挖过 1 个词的挖词日数量。换日边界使用 Anki 的 rollover 设置。",
+            ),
             render_summary_card(
                 "Average / active day",
                 "活跃日均",
                 f"{average_per_active_day:.1f}",
+                "Mined words divided by active mining days. Days with zero mined words are excluded.",
+                "挖词数除以挖词天数。完全没有挖词的日期不计入分母。",
             ),
             render_summary_card(
                 "Best day",
                 "最高单日",
                 f"{max_day_words:,} · {html.escape(max_day)}",
+                "Mining day with the highest mined-word count after timezone and rollover adjustment.",
+                "按时区和换日时间调整后，挖词数最高的挖词日。",
             ),
-            render_summary_card("Date range", "日期范围", f"{date_start} - {date_end}"),
+            render_summary_card(
+                "Date range",
+                "日期范围",
+                f"{date_start} - {date_end}",
+                "Earliest to latest mining day after timezone and Anki rollover adjustment.",
+                "按时区和 Anki 换日时间调整后的最早到最晚挖词日。",
+            ),
         ]
     )
 
@@ -823,6 +861,44 @@ def render_timeline_html(
       border-radius: 14px;
       padding: 18px;
       min-height: 106px;
+      position: relative;
+    }
+    .summary-card[data-tip-en] {
+      cursor: help;
+    }
+    .summary-card[data-tip-en]::after {
+      content: attr(data-tip-en);
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      top: calc(100% - 8px);
+      z-index: 30;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 253, 248, 0.98);
+      box-shadow: 0 10px 26px rgba(28, 31, 34, 0.14);
+      color: var(--ink);
+      font-size: 0.86rem;
+      line-height: 1.45;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-4px);
+      transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+      pointer-events: none;
+    }
+    html[data-lang="zh"] .summary-card[data-tip-zh]::after {
+      content: attr(data-tip-zh);
+    }
+    .summary-card[data-tip-en]:hover::after,
+    .summary-card[data-tip-en]:focus::after {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
+    .summary-card[data-tip-en]:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
     .summary-value {
       font-size: 1.55rem;
@@ -1569,21 +1645,41 @@ def build_html(
 
     summary_cards = "\n".join(
         [
-            render_summary_card("Cards", "卡片数", f"{total_cards:,}"),
+            render_summary_card(
+                "Cards",
+                "卡片数",
+                f"{total_cards:,}",
+                "All matching Anki cards after note type and deck filters. Multiple cards from the same note are counted separately.",
+                "经过笔记类型和牌组筛选后的 Anki 卡片数。同一条笔记的多张卡片会分别计数。",
+            ),
             render_summary_card(
                 "Studied cards",
                 "已学卡片",
                 f"{studied_cards:,} ({studied_percent:.1f}%)",
+                "Matching cards with at least one review. The percentage is studied cards divided by all matching cards.",
+                "至少复习过一次的匹配卡片。百分比为已学卡片数除以全部匹配卡片数。",
             ),
             render_summary_card(
-                "Distinct source entries", "来源条目数", f"{len(source_counts):,}"
+                "Distinct source entries",
+                "来源条目数",
+                f"{len(source_counts):,}",
+                "Distinct exact source strings from MiscInfo after stripping timestamp suffixes such as (2m21s).",
+                "从 MiscInfo 提取并去掉类似 (2m21s) 时间戳后的精确来源字符串去重数。",
             ),
             render_summary_card(
                 "Distinct works / materials",
                 "作品 / 材料数",
                 f"{len(work_counts):,}",
+                "Distinct heuristic work/material labels derived from exact source strings.",
+                "由精确来源字符串启发式归并出的作品 / 材料标签去重数。",
             ),
-            render_summary_card("Decks", "牌组数", f"{len(deck_counts):,}"),
+            render_summary_card(
+                "Decks",
+                "牌组数",
+                f"{len(deck_counts):,}",
+                "Distinct Anki decks among matching cards.",
+                "匹配卡片所属的 Anki 牌组去重数。",
+            ),
         ]
     )
 
@@ -1804,6 +1900,44 @@ def build_html(
       padding: 18px;
       min-height: 110px;
       box-shadow: 0 10px 25px rgba(67, 40, 20, 0.05);
+      position: relative;
+    }}
+    .summary-card[data-tip-en] {{
+      cursor: help;
+    }}
+    .summary-card[data-tip-en]::after {{
+      content: attr(data-tip-en);
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      top: calc(100% - 8px);
+      z-index: 30;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 253, 248, 0.98);
+      box-shadow: 0 10px 26px rgba(67, 40, 20, 0.14);
+      color: var(--ink);
+      font-size: 0.86rem;
+      line-height: 1.45;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-4px);
+      transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+      pointer-events: none;
+    }}
+    html[data-lang="zh"] .summary-card[data-tip-zh]::after {{
+      content: attr(data-tip-zh);
+    }}
+    .summary-card[data-tip-en]:hover::after,
+    .summary-card[data-tip-en]:focus::after {{
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }}
+    .summary-card[data-tip-en]:focus {{
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }}
     .summary-value {{
       font-size: 1.8rem;
