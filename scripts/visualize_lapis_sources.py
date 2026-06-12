@@ -11,7 +11,7 @@ import sqlite3
 import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -94,6 +94,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Timezone for grouping note creation dates, for example Asia/Shanghai. "
             "Defaults to the system local timezone."
+        ),
+    )
+    parser.add_argument(
+        "--day-start-hour",
+        type=int,
+        default=None,
+        help=(
+            "Override the hour when a mining day starts in the selected timezone. "
+            "Defaults to Anki's collection rollover setting, falling back to 4."
         ),
     )
     return parser.parse_args()
@@ -259,12 +268,62 @@ def resolve_timezone(timezone_name: str):
         raise SystemExit(f"Unknown timezone: {timezone_name}") from error
 
 
+def decode_config_value(raw):
+    if raw is None:
+        return None
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+    text = text.strip()
+    if not text:
+        return None
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def collection_config_value(conn: sqlite3.Connection, key: str):
+    try:
+        row = conn.execute("select val from config where key=?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is not None:
+        return decode_config_value(row[0])
+
+    row = conn.execute("select conf from col limit 1").fetchone()
+    if row is None:
+        return None
+    conf = decode_config_value(row[0])
+    if isinstance(conf, dict):
+        return conf.get(key)
+    return None
+
+
+def validate_day_start_hour(value: int) -> int:
+    if not 0 <= value <= 23:
+        raise SystemExit("--day-start-hour must be between 0 and 23.")
+    return value
+
+
+def collection_day_start_hour(conn: sqlite3.Connection, fallback: int = 4) -> int:
+    value = collection_config_value(conn, "rollover")
+    if value is None:
+        return fallback
+    try:
+        return validate_day_start_hour(int(value))
+    except (TypeError, ValueError) as error:
+        raise SystemExit(f"Invalid Anki rollover value: {value!r}") from error
+
+
 def mined_datetime_from_note_id(note_id: int, time_zone) -> datetime:
     return datetime.fromtimestamp(note_id / 1000, time_zone)
 
 
-def build_period_labels(mined_at: datetime) -> tuple[str, str, str]:
-    mined_day = mined_at.date()
+def build_period_labels(
+    mined_at: datetime, day_start_hour: int = 4
+) -> tuple[str, str, str]:
+    mining_day_at = mined_at - timedelta(hours=day_start_hour)
+    mined_day = mining_day_at.date()
     iso_year, iso_week, _ = mined_day.isocalendar()
     return (
         mined_day.isoformat(),
@@ -279,6 +338,7 @@ def load_records(
     field_ord: int,
     deck_contains: str,
     time_zone,
+    day_start_hour: int = 4,
 ) -> list[Record]:
     deck_filter = deck_contains.casefold().strip()
     records: list[Record] = []
@@ -300,7 +360,9 @@ def load_records(
             continue
 
         mined_at = mined_datetime_from_note_id(int(note_id), time_zone)
-        mined_date, mined_week, mined_month = build_period_labels(mined_at)
+        mined_date, mined_week, mined_month = build_period_labels(
+            mined_at, day_start_hour
+        )
         fields = flds.split("\x1f")
         raw_misc = fields[field_ord] if len(fields) > field_ord else ""
         lines = strip_misc_html(raw_misc)
@@ -594,6 +656,7 @@ def render_timeline_html(
     note_type_name: str,
     deck_contains: str,
     time_zone_label: str,
+    day_start_hour: int,
 ) -> str:
     payload = build_timeline_payload(records, time_zone_label)
     summary = payload["summary"]
@@ -1417,6 +1480,7 @@ def render_timeline_html(
         <span class="chip">{render_bilingual(f"Note type: {note_type_escaped}", f"笔记类型：{note_type_escaped}", escape_text=False)}</span>
         <span class="chip">{render_bilingual(f"Deck filter: {html.escape(deck_scope_en)}", f"牌组筛选：{html.escape(deck_scope_zh)}", escape_text=False)}</span>
         <span class="chip">{render_bilingual(f"Timezone: {html.escape(time_zone_label)}", f"时区：{html.escape(time_zone_label)}", escape_text=False)}</span>
+        <span class="chip">{render_bilingual(f"Day starts: {day_start_hour:02d}:00", f"换日时间：{day_start_hour:02d}:00", escape_text=False)}</span>
         <span class="chip">{render_bilingual(f"Generated: {html.escape(generated_at)}", f"生成时间：{html.escape(generated_at)}", escape_text=False)}</span>
       </div>
     </section>
@@ -2035,11 +2099,21 @@ def main() -> int:
     try:
         conn = sqlite3.connect(snapshot_db)
         register_unicase(conn)
+        day_start_hour = (
+            validate_day_start_hour(args.day_start_hour)
+            if args.day_start_hour is not None
+            else collection_day_start_hour(conn)
+        )
 
         note_type_id = find_note_type_id(conn, args.note_type)
         field_ord = find_field_ord(conn, note_type_id, args.field)
         records = load_records(
-            conn, note_type_id, field_ord, args.deck_contains, time_zone
+            conn,
+            note_type_id,
+            field_ord,
+            args.deck_contains,
+            time_zone,
+            day_start_hour,
         )
 
         if not records:
@@ -2064,6 +2138,7 @@ def main() -> int:
                 note_type_name=args.note_type,
                 deck_contains=args.deck_contains,
                 time_zone_label=timezone_display_name(time_zone),
+                day_start_hour=day_start_hour,
             ),
             encoding="utf-8",
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import sqlite3
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -8,6 +9,7 @@ from scripts.visualize_lapis_sources import (
     Record,
     aggregate_timeline_counts,
     build_period_labels,
+    collection_day_start_hour,
     mined_datetime_from_note_id,
     timeline_summary,
     unique_note_records,
@@ -21,8 +23,11 @@ def make_record(
     source: str,
     *,
     card_id: int | None = None,
+    day_start_hour: int = 4,
 ) -> Record:
-    mined_date, mined_week, mined_month = build_period_labels(mined_at)
+    mined_date, mined_week, mined_month = build_period_labels(
+        mined_at, day_start_hour
+    )
     return Record(
         card_id=card_id or note_id,
         note_id=note_id,
@@ -40,16 +45,40 @@ def make_record(
 
 
 class TimelineTests(unittest.TestCase):
-    def test_note_id_uses_requested_timezone(self) -> None:
+    def test_collection_day_start_hour_reads_anki_rollover(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                "create table config (key text not null primary key, usn integer not null, mtime_secs integer not null, val blob not null) without rowid"
+            )
+            conn.execute(
+                "insert into config (key, usn, mtime_secs, val) values (?, 0, 0, ?)",
+                ("rollover", b"5"),
+            )
+
+            self.assertEqual(collection_day_start_hour(conn), 5)
+        finally:
+            conn.close()
+
+    def test_note_id_uses_requested_timezone_and_day_start(self) -> None:
         note_time = datetime(2026, 1, 4, 17, 0, tzinfo=timezone.utc)
         note_id = int(note_time.timestamp() * 1000)
 
         mined_at = mined_datetime_from_note_id(note_id, ZoneInfo("Asia/Shanghai"))
         mined_date, mined_week, mined_month = build_period_labels(mined_at)
 
-        self.assertEqual(mined_date, "2026-01-05")
-        self.assertEqual(mined_week, "2026-W02")
+        self.assertEqual(mined_date, "2026-01-04")
+        self.assertEqual(mined_week, "2026-W01")
         self.assertEqual(mined_month, "2026-01")
+
+    def test_four_am_starts_new_mining_day(self) -> None:
+        tz = ZoneInfo("Asia/Shanghai")
+
+        before_four = build_period_labels(datetime(2026, 6, 12, 3, 59, tzinfo=tz))
+        at_four = build_period_labels(datetime(2026, 6, 12, 4, 0, tzinfo=tz))
+
+        self.assertEqual(before_four[0], "2026-06-11")
+        self.assertEqual(at_four[0], "2026-06-12")
 
     def test_unique_note_records_deduplicates_multi_card_notes(self) -> None:
         mined_at = datetime(2026, 6, 12, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))

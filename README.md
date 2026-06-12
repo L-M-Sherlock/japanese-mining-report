@@ -104,8 +104,9 @@ uv run scripts/visualize_lapis_sources.py \
 - `--output`: output HTML path
 - `--timeline-output`: output HTML path for the mining timeline report
 - `--timezone`: timezone used to group note creation dates, default system local timezone
+- `--day-start-hour`: optional override for the hour when a mining day starts; by default this follows Anki's collection rollover setting
 
-The timeline report counts unique notes, not review events. For the default `Lapis` setup, one note corresponds to one mined word. Dates come from Anki note IDs, which are creation timestamps in milliseconds.
+The timeline report counts unique notes, not review events. For the default `Lapis` setup, one note corresponds to one mined word. Dates come from Anki note IDs, which are creation timestamps in milliseconds. Notes created before Anki's rollover hour are counted toward the previous mining day.
 
 ## Files in This Directory
 
