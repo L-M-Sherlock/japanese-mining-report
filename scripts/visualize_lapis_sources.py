@@ -1850,6 +1850,28 @@ def build_html(
       gap: 16px;
       flex-wrap: wrap;
     }}
+    .actions {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: flex-start;
+    }}
+    .link-button {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 38px;
+      padding: 0 14px;
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+      background: #f3ebdf;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+    }}
+    .link-button:hover {{
+      text-decoration: none;
+    }}
     .lang-toggle {{
       display: inline-flex;
       align-items: center;
@@ -2076,6 +2098,9 @@ def build_html(
       .hero-top {{
         align-items: stretch;
       }}
+      .actions {{
+        justify-content: flex-start;
+      }}
       .bar-row-header {{
         display: none;
       }}
@@ -2113,9 +2138,14 @@ def build_html(
     <section class="hero">
       <div class="hero-top">
         <h1>{title_html}</h1>
-        <div class="lang-toggle" role="group" aria-label="Language switch">
-          <button type="button" class="lang-button active" data-set-lang="en" aria-pressed="true">EN</button>
-          <button type="button" class="lang-button" data-set-lang="zh" aria-pressed="false">中文</button>
+        <div class="actions">
+          <a class="link-button" href="lapis_mining_timeline_report.html">
+            {render_bilingual("Timeline report", "时间线报告")}
+          </a>
+          <div class="lang-toggle" role="group" aria-label="Language switch">
+            <button type="button" class="lang-button active" data-set-lang="en" aria-pressed="true">EN</button>
+            <button type="button" class="lang-button" data-set-lang="zh" aria-pressed="false">中文</button>
+          </div>
         </div>
       </div>
       <p>{hero_intro}</p>
