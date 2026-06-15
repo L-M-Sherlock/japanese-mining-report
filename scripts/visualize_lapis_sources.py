@@ -1537,12 +1537,12 @@ def render_timeline_html(
       const margin = 12;
       const rect = hoverTooltip.getBoundingClientRect();
       let left = clientX + margin;
-      let top = clientY + margin;
+      let top = clientY - rect.height - margin;
       if (left + rect.width > window.innerWidth - margin) {
         left = clientX - rect.width - margin;
       }
-      if (top + rect.height > window.innerHeight - margin) {
-        top = clientY - rect.height - margin;
+      if (top < margin) {
+        top = clientY + margin;
       }
       hoverTooltip.style.transform =
         `translate(${Math.max(margin, left)}px, ${Math.max(margin, top)}px)`;
