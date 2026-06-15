@@ -9,6 +9,7 @@ from scripts.visualize_lapis_sources import (
     Record,
     aggregate_timeline_counts,
     build_period_labels,
+    classify_source_category,
     collection_day_start_hour,
     mined_datetime_from_note_id,
     timeline_summary,
@@ -45,6 +46,31 @@ def make_record(
 
 
 class TimelineTests(unittest.TestCase):
+    def test_classify_source_category(self) -> None:
+        self.assertEqual(
+            classify_source_category(
+                "週に一度クラスメイトを買う話",
+                "週に一度クラスメイトを買う話",
+                "Hoshi",
+            ),
+            "novel",
+        )
+        self.assertEqual(
+            classify_source_category(
+                "Karakai Jouzu no Takagi-san 第01話.srt (2m21s)",
+                "Karakai Jouzu no Takagi-san 第01話.srt",
+                "",
+            ),
+            "anime",
+        )
+        self.assertEqual(
+            classify_source_category("Citrus [01].ass", "Citrus [01].ass", ""),
+            "anime",
+        )
+        self.assertEqual(
+            classify_source_category("#about＆rules", "#about＆rules", ""), "other"
+        )
+
     def test_collection_day_start_hour_reads_anki_rollover(self) -> None:
         conn = sqlite3.connect(":memory:")
         try:

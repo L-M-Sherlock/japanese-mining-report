@@ -21,6 +21,10 @@ BR_RE = re.compile(r"<br\s*/?>", flags=re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
 TIMESTAMP_RE = re.compile(r"\s*\((?:\d+h)?\d+m\d+s\)\s*$")
 URL_RE = re.compile(r"https?://\S+")
+SUBTITLE_SOURCE_RE = re.compile(
+    r"\.(?:srt|ass)(?:\s*\((?:\d+h)?\d+m\d+s\))?\s*$",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,7 @@ class Record:
     url: str
     deck: str
     studied: bool
+    source_category: str = "other"
 
 
 def parse_args() -> argparse.Namespace:
@@ -257,6 +262,18 @@ def guess_work_label(source: str) -> str:
     return work or source
 
 
+def has_hoshi_tag(tags: str) -> bool:
+    return any(tag.casefold() == "hoshi" for tag in tags.split())
+
+
+def classify_source_category(raw_source: str, cleaned_source: str, tags: str) -> str:
+    if has_hoshi_tag(tags):
+        return "novel"
+    if TIMESTAMP_RE.search(raw_source) or SUBTITLE_SOURCE_RE.search(cleaned_source):
+        return "anime"
+    return "other"
+
+
 def resolve_timezone(timezone_name: str):
     timezone_name = timezone_name.strip()
     if not timezone_name:
@@ -345,7 +362,7 @@ def load_records(
 
     rows = conn.execute(
         """
-        select c.id, n.id, d.name, n.flds, c.reps
+        select c.id, n.id, d.name, n.flds, c.reps, n.tags
         from cards c
         join notes n on n.id = c.nid
         join decks d on d.id = c.did
@@ -355,7 +372,7 @@ def load_records(
         (note_type_id,),
     )
 
-    for card_id, note_id, deck_name, flds, reps in rows:
+    for card_id, note_id, deck_name, flds, reps, tags in rows:
         if deck_filter and deck_filter not in deck_name.casefold():
             continue
 
@@ -366,9 +383,11 @@ def load_records(
         fields = flds.split("\x1f")
         raw_misc = fields[field_ord] if len(fields) > field_ord else ""
         lines = strip_misc_html(raw_misc)
+        raw_source = lines[0] if lines else ""
         source = extract_source_label(lines)
         url = extract_url(lines)
         domain = extract_domain(url)
+        work = guess_work_label(source)
 
         records.append(
             Record(
@@ -379,11 +398,12 @@ def load_records(
                 mined_week=mined_week,
                 mined_month=mined_month,
                 source=source,
-                work=guess_work_label(source),
+                work=work,
                 domain=domain,
                 url=url,
                 deck=deck_name,
                 studied=reps > 0,
+                source_category=classify_source_category(raw_source, source, tags or ""),
             )
         )
 
@@ -488,6 +508,7 @@ def build_timeline_payload(records: list[Record], time_zone_label: str) -> dict[
                 "month": record.mined_month,
                 "work": record.work,
                 "source": record.source,
+                "category": record.source_category,
             }
             for record in timeline_records
         ],
@@ -916,7 +937,7 @@ def render_timeline_html(
     }
     .controls {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 12px;
       align-items: end;
     }
@@ -1209,6 +1230,7 @@ def render_timeline_html(
     const langButtons = Array.from(document.querySelectorAll('[data-set-lang]'));
     const periodButtons = Array.from(document.querySelectorAll('[data-period]'));
     const grainButtons = Array.from(document.querySelectorAll('[data-grain]'));
+    const categoryButtons = Array.from(document.querySelectorAll('[data-category]'));
     const filterInput = document.getElementById('sourceFilter');
     const stackChart = document.getElementById('stackChart');
     const tableBody = document.getElementById('timelineTableBody');
@@ -1253,6 +1275,7 @@ def render_timeline_html(
       lang: 'en',
       period: 'day',
       grain: 'work',
+      category: 'all',
       query: '',
     };
 
@@ -1325,10 +1348,13 @@ def render_timeline_html(
     function filteredRecords() {
       const key = sourceKey();
       const query = state.query.trim().toLowerCase();
-      if (!query) return reportData.records;
-      return reportData.records.filter((record) =>
-        String(record[key]).toLowerCase().includes(query)
-      );
+      return reportData.records.filter((record) => {
+        if (state.category !== 'all' && record.category !== state.category) {
+          return false;
+        }
+        if (!query) return true;
+        return String(record[key]).toLowerCase().includes(query);
+      });
     }
 
     function increment(map, key, value = 1) {
@@ -1517,6 +1543,13 @@ def render_timeline_html(
         render();
       });
     }
+    for (const button of categoryButtons) {
+      button.addEventListener('click', () => {
+        state.category = button.dataset.category;
+        categoryButtons.forEach((item) => item.classList.toggle('active', item === button));
+        render();
+      });
+    }
     filterInput.addEventListener('input', () => {
       state.query = filterInput.value;
       render();
@@ -1614,6 +1647,14 @@ def render_timeline_html(
           <span class="segmented" role="group" aria-label="Source grain">
             <button type="button" class="segmented-button active" data-grain="work">{render_bilingual("Work / material", "作品 / 材料")}</button>
             <button type="button" class="segmented-button" data-grain="source">{render_bilingual("Exact source", "原始来源")}</button>
+          </span>
+        </div>
+        <div>
+          <span class="control-label">{render_bilingual("Source category", "来源分类")}</span>
+          <span class="segmented" role="group" aria-label="Source category">
+            <button type="button" class="segmented-button active" data-category="all">{render_bilingual("All", "全部")}</button>
+            <button type="button" class="segmented-button" data-category="anime">{render_bilingual("Anime", "动画")}</button>
+            <button type="button" class="segmented-button" data-category="novel">{render_bilingual("Novel", "小说")}</button>
           </span>
         </div>
         <label for="sourceFilter">
