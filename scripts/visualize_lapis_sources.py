@@ -977,6 +977,11 @@ def render_timeline_html(
       transform: rotate(180deg);
       white-space: nowrap;
     }
+    html[data-lang="zh"] .y-axis-title {
+      text-orientation: upright;
+      line-height: 1;
+      transform: none;
+    }
     .y-axis-ticks {
       grid-column: 2;
       grid-row: 1;
