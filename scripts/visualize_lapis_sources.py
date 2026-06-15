@@ -1068,8 +1068,13 @@ def render_timeline_html(
       min-height: 1px;
       cursor: help;
     }
-    .stack-segment:hover {
+    .stack-segment:hover,
+    .stack-segment:focus {
       filter: brightness(1.12);
+    }
+    .stack-segment:focus {
+      outline: 2px solid var(--ink);
+      outline-offset: -2px;
     }
     .time-label {
       width: 100%;
@@ -1094,6 +1099,8 @@ def render_timeline_html(
     }
     .chart-tooltip {
       position: fixed;
+      top: 0;
+      left: 0;
       z-index: 50;
       max-width: min(420px, calc(100vw - 24px));
       padding: 10px 12px;
@@ -1264,20 +1271,31 @@ def render_timeline_html(
     function showTooltip(event, text) {
       hoverTooltip.textContent = text;
       hoverTooltip.classList.add('visible');
-      moveTooltip(event);
+      moveTooltipTo(event.clientX, event.clientY);
     }
 
     function moveTooltip(event) {
       if (!hoverTooltip.textContent) return;
+      moveTooltipTo(event.clientX, event.clientY);
+    }
+
+    function showTooltipForElement(element, text) {
+      hoverTooltip.textContent = text;
+      hoverTooltip.classList.add('visible');
+      const rect = element.getBoundingClientRect();
+      moveTooltipTo(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    }
+
+    function moveTooltipTo(clientX, clientY) {
       const margin = 12;
       const rect = hoverTooltip.getBoundingClientRect();
-      let left = event.clientX + margin;
-      let top = event.clientY + margin;
+      let left = clientX + margin;
+      let top = clientY + margin;
       if (left + rect.width > window.innerWidth - margin) {
-        left = event.clientX - rect.width - margin;
+        left = clientX - rect.width - margin;
       }
       if (top + rect.height > window.innerHeight - margin) {
-        top = event.clientY - rect.height - margin;
+        top = clientY - rect.height - margin;
       }
       hoverTooltip.style.transform =
         `translate(${Math.max(margin, left)}px, ${Math.max(margin, top)}px)`;
@@ -1402,7 +1420,7 @@ def render_timeline_html(
                       const segmentHeight = Math.max((piece.count / period.total) * 100, 1);
                       const share = ((piece.count / period.total) * 100).toFixed(1);
                       const segmentTooltip = `${period.period}\\n${piece.label}\\n${piece.count.toLocaleString()} / ${period.total.toLocaleString()} (${share}%)`;
-                      return `<div class="stack-segment" data-tooltip="${escapeAttr(segmentTooltip)}" title="${escapeAttr(segmentTooltip)}" style="height:${segmentHeight.toFixed(2)}%; background:${piece.color}"></div>`;
+                      return `<div class="stack-segment" data-tooltip="${escapeAttr(segmentTooltip)}" aria-label="${escapeAttr(segmentTooltip)}" tabindex="0" style="height:${segmentHeight.toFixed(2)}%; background:${piece.color}"></div>`;
                     }).join('')}
                   </div>
                 </div>
@@ -1511,6 +1529,16 @@ def render_timeline_html(
     stackChart.addEventListener('mouseout', (event) => {
       const segment = event.target.closest('.stack-segment');
       if (!segment || segment.contains(event.relatedTarget)) return;
+      hideTooltip();
+    });
+    stackChart.addEventListener('focusin', (event) => {
+      const segment = event.target.closest('.stack-segment');
+      if (!segment || !stackChart.contains(segment)) return;
+      showTooltipForElement(segment, segment.dataset.tooltip || '');
+    });
+    stackChart.addEventListener('focusout', (event) => {
+      const segment = event.target.closest('.stack-segment');
+      if (!segment) return;
       hideTooltip();
     });
 
