@@ -127,6 +127,41 @@ uv run scripts/visualize_lapis_sources.py \
 
 The timeline report counts unique notes, not review events. For the default `Lapis` setup, one note corresponds to one mined word. Dates come from Anki note IDs, which are creation timestamps in milliseconds. Notes created before Anki's rollover hour are counted toward the previous mining day. Learning status is intentionally left to the source report.
 
+## Publishing to GitHub Pages
+
+You can opt in to publishing the generated reports to a profile-specific branch:
+
+```bash
+uv run scripts/visualize_lapis_sources.py \
+  --db "$HOME/Library/Application Support/Anki2/JarrettYe/collection.anki2" \
+  --publish-pages
+```
+
+By default this infers the Anki profile name from the parent directory of `collection.anki2`, then pushes a static site branch named `reports/<profile>`. For the example above, the branch is `reports/JarrettYe`.
+
+The published branch contains only:
+
+- `index.html`: a small landing page linking to both reports
+- `lapis_source_report.html`
+- `lapis_mining_timeline_report.html`
+
+Publishing options:
+
+- `--publish-pages`: enable the publish step after local report generation
+- `--pages-remote`: git remote to push to, default `origin`
+- `--pages-branch-prefix`: branch prefix, default `reports/`
+- `--profile-name`: override the inferred profile name
+
+One-time GitHub Pages setup:
+
+1. Open the repository on GitHub.
+2. Go to `Settings -> Pages`.
+3. Set `Build and deployment` to `Deploy from a branch`.
+4. Select the generated branch, for example `reports/JarrettYe`.
+5. Select folder `/root`.
+
+The report HTML contains your source names and mining statistics. If the repository is public, the published GitHub Pages site is public too.
+
 ## Files in This Directory
 
 - [pyproject.toml](pyproject.toml): project metadata for `uv`

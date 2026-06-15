@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -110,6 +111,35 @@ def parse_args() -> argparse.Namespace:
             "Defaults to Anki's collection rollover setting, falling back to 4."
         ),
     )
+    parser.add_argument(
+        "--publish-pages",
+        action="store_true",
+        help=(
+            "After writing local reports, commit a minimal static site to a "
+            "profile-specific Git branch and push it for GitHub Pages."
+        ),
+    )
+    parser.add_argument(
+        "--pages-remote",
+        default="origin",
+        help="Git remote used by --publish-pages. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--pages-branch-prefix",
+        default="reports/",
+        help=(
+            "Prefix for the published branch. The profile name is appended to "
+            "this value. Default: %(default)s"
+        ),
+    )
+    parser.add_argument(
+        "--profile-name",
+        default="",
+        help=(
+            "Profile name used for the published branch. If omitted, it is "
+            "inferred from the parent directory of collection.anki2."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -161,6 +191,185 @@ def resolve_db_path(db_arg: Path | None) -> Path:
         "ANKI_COLLECTION_PATH, or run the script from a directory containing "
         "the database."
     )
+
+
+def run_git(
+    args: list[str],
+    *,
+    cwd: Path,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        command = " ".join(["git", *args])
+        raise SystemExit(f"Git command failed: {command}\n{detail}")
+    return result
+
+
+def git_output(args: list[str], *, cwd: Path) -> str:
+    return run_git(args, cwd=cwd).stdout.strip()
+
+
+def infer_profile_name_from_db(db_path: Path) -> str:
+    profile_name = db_path.expanduser().resolve().parent.name.strip()
+    if not profile_name:
+        raise SystemExit(f"Could not infer profile name from database path: {db_path}")
+    return profile_name
+
+
+def build_pages_branch_name(profile_name: str, branch_prefix: str = "reports/") -> str:
+    branch = f"{branch_prefix}{profile_name.strip()}"
+    if not branch:
+        raise SystemExit("Published branch name is empty.")
+    return branch
+
+
+def validate_pages_branch_name(branch: str, *, repo_dir: Path | None = None) -> str:
+    repo_dir = repo_dir or Path.cwd()
+    result = run_git(["check-ref-format", "--branch", branch], cwd=repo_dir, check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise SystemExit(f"Invalid published branch name {branch!r}: {detail}")
+    return branch
+
+
+def render_pages_index(profile_name: str) -> str:
+    title = html.escape(f"Japanese Mining Report - {profile_name}")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: ui-serif, Georgia, "Times New Roman", serif;
+      background: #fbf7ef;
+      color: #1c1f22;
+    }}
+    main {{
+      width: min(720px, calc(100vw - 40px));
+      border: 1px solid #d9d0c4;
+      border-radius: 14px;
+      background: #fffdf8;
+      padding: 28px;
+      box-shadow: 0 16px 40px rgba(46, 38, 28, 0.08);
+    }}
+    h1 {{ margin: 0 0 10px; font-size: 2rem; }}
+    p {{ color: #68717a; line-height: 1.5; }}
+    nav {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }}
+    a {{
+      color: #14665d;
+      text-decoration: none;
+      border: 1px solid #d9d0c4;
+      border-radius: 999px;
+      padding: 10px 16px;
+      background: #f2eadf;
+      font-weight: 700;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{title}</h1>
+    <p>Choose a generated report for this Anki profile.</p>
+    <nav>
+      <a href="lapis_mining_timeline_report.html">Timeline report</a>
+      <a href="lapis_source_report.html">Source report</a>
+    </nav>
+  </main>
+</body>
+</html>
+"""
+
+
+def clear_publish_worktree(worktree: Path) -> None:
+    for child in worktree.iterdir():
+        if child.name == ".git":
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def publish_reports_to_pages(
+    *,
+    source_report: Path,
+    timeline_report: Path,
+    db_path: Path,
+    remote: str = "origin",
+    branch_prefix: str = "reports/",
+    profile_name: str = "",
+    repo_dir: Path | None = None,
+) -> str:
+    if not source_report.exists():
+        raise SystemExit(f"Source report does not exist: {source_report}")
+    if not timeline_report.exists():
+        raise SystemExit(f"Timeline report does not exist: {timeline_report}")
+
+    repo_dir = (repo_dir or Path.cwd()).resolve()
+    profile = profile_name.strip() or infer_profile_name_from_db(db_path)
+    branch = validate_pages_branch_name(
+        build_pages_branch_name(profile, branch_prefix), repo_dir=repo_dir
+    )
+    remote_url = git_output(["remote", "get-url", remote], cwd=repo_dir)
+
+    with tempfile.TemporaryDirectory(prefix="japanese-mining-pages-") as temp_root:
+        publish_dir = Path(temp_root) / "site"
+        publish_dir.mkdir()
+        run_git(["init"], cwd=publish_dir)
+        run_git(["config", "user.name", "Japanese Mining Report"], cwd=publish_dir)
+        run_git(
+            ["config", "user.email", "japanese-mining-report@example.invalid"],
+            cwd=publish_dir,
+        )
+        run_git(["remote", "add", remote, remote_url], cwd=publish_dir)
+
+        fetch_result = run_git(
+            [
+                "fetch",
+                "--depth=1",
+                remote,
+                f"refs/heads/{branch}:refs/remotes/{remote}/{branch}",
+            ],
+            cwd=publish_dir,
+            check=False,
+        )
+        if fetch_result.returncode == 0:
+            run_git(
+                ["checkout", "-B", branch, f"refs/remotes/{remote}/{branch}"],
+                cwd=publish_dir,
+            )
+        else:
+            run_git(["checkout", "--orphan", branch], cwd=publish_dir)
+
+        clear_publish_worktree(publish_dir)
+        (publish_dir / "index.html").write_text(
+            render_pages_index(profile), encoding="utf-8"
+        )
+        shutil.copy2(source_report, publish_dir / "lapis_source_report.html")
+        shutil.copy2(
+            timeline_report, publish_dir / "lapis_mining_timeline_report.html"
+        )
+
+        if git_output(["status", "--porcelain"], cwd=publish_dir):
+            run_git(["add", "--all"], cwd=publish_dir)
+            run_git(["commit", "-m", f"Update reports for {profile}"], cwd=publish_dir)
+        run_git(["push", remote, f"HEAD:refs/heads/{branch}"], cwd=publish_dir)
+
+    return branch
 
 
 def find_note_type_id(conn: sqlite3.Connection, note_type_name: str) -> int:
@@ -2400,6 +2609,16 @@ def main() -> int:
         f"Wrote {len(unique_note_records(records)):,} mined notes to "
         f"{timeline_output_path}"
     )
+    if args.publish_pages:
+        branch = publish_reports_to_pages(
+            source_report=output_path,
+            timeline_report=timeline_output_path,
+            db_path=db_path,
+            remote=args.pages_remote,
+            branch_prefix=args.pages_branch_prefix,
+            profile_name=args.profile_name,
+        )
+        print(f"Pushed GitHub Pages reports to branch {branch!r}.")
     return 0
 
 

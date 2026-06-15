@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import subprocess
+import tempfile
 import unittest
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from scripts.visualize_lapis_sources import (
     Record,
     aggregate_timeline_counts,
+    build_pages_branch_name,
     build_period_labels,
     classify_source_category,
     collection_day_start_hour,
+    infer_profile_name_from_db,
     mined_datetime_from_note_id,
     normalize_novel_work_label,
+    publish_reports_to_pages,
     timeline_summary,
     unique_note_records,
+    validate_pages_branch_name,
 )
 
 
@@ -44,6 +51,16 @@ def make_record(
         deck="Japanese",
         studied=False,
     )
+
+
+def run_git(args: list[str], cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
 
 
 class TimelineTests(unittest.TestCase):
@@ -181,6 +198,84 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(summary["maxDay"], "2026-06-01")
         self.assertEqual(summary["maxDayWords"], 2)
         self.assertEqual(summary["averagePerActiveDay"], 1.5)
+
+
+class PublishPagesTests(unittest.TestCase):
+    def test_profile_branch_name_defaults(self) -> None:
+        db_path = Path(
+            "/Users/example/Library/Application Support/Anki2/JarrettYe/collection.anki2"
+        )
+
+        profile_name = infer_profile_name_from_db(db_path)
+        branch_name = build_pages_branch_name(profile_name)
+
+        self.assertEqual(profile_name, "JarrettYe")
+        self.assertEqual(branch_name, "reports/JarrettYe")
+        self.assertEqual(validate_pages_branch_name(branch_name), branch_name)
+        with self.assertRaises(SystemExit):
+            validate_pages_branch_name("reports/Bad Profile")
+
+    def test_publish_reports_to_pages_pushes_static_branch_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            remote_repo = root / "remote.git"
+            source_repo = root / "source"
+            source_repo.mkdir()
+            run_git(["init", "--bare", str(remote_repo)], root)
+            run_git(["init"], source_repo)
+            run_git(["checkout", "-b", "main"], source_repo)
+            run_git(["config", "user.name", "Test User"], source_repo)
+            run_git(["config", "user.email", "test@example.invalid"], source_repo)
+            (source_repo / "README.md").write_text("source repo\n", encoding="utf-8")
+            run_git(["add", "README.md"], source_repo)
+            run_git(["commit", "-m", "Initial commit"], source_repo)
+            run_git(["remote", "add", "origin", str(remote_repo)], source_repo)
+
+            source_report = root / "lapis_source_report.html"
+            timeline_report = root / "lapis_mining_timeline_report.html"
+            source_report.write_text("<h1>source</h1>\n", encoding="utf-8")
+            timeline_report.write_text("<h1>timeline</h1>\n", encoding="utf-8")
+
+            branch = publish_reports_to_pages(
+                source_report=source_report,
+                timeline_report=timeline_report,
+                db_path=Path("/Anki2/JarrettYe/collection.anki2"),
+                remote="origin",
+                repo_dir=source_repo,
+            )
+
+            self.assertEqual(branch, "reports/JarrettYe")
+            self.assertEqual(run_git(["branch", "--show-current"], source_repo), "main")
+            files = run_git(
+                [
+                    "--git-dir",
+                    str(remote_repo),
+                    "ls-tree",
+                    "-r",
+                    "--name-only",
+                    "reports/JarrettYe",
+                ],
+                root,
+            ).splitlines()
+            self.assertEqual(
+                files,
+                [
+                    "index.html",
+                    "lapis_mining_timeline_report.html",
+                    "lapis_source_report.html",
+                ],
+            )
+            index_html = run_git(
+                [
+                    "--git-dir",
+                    str(remote_repo),
+                    "show",
+                    "reports/JarrettYe:index.html",
+                ],
+                root,
+            )
+            self.assertIn("Timeline report", index_html)
+            self.assertIn("Source report", index_html)
 
 
 if __name__ == "__main__":
