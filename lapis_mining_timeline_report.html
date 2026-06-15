@@ -499,7 +499,7 @@
         <span class="chip"><span class='lang lang-en'>Deck filter: (all decks with matching note type)</span><span class='lang lang-zh'>牌组筛选：（匹配该笔记类型的全部牌组）</span></span>
         <span class="chip"><span class='lang lang-en'>Timezone: CST</span><span class='lang lang-zh'>时区：CST</span></span>
         <span class="chip"><span class='lang lang-en'>Day starts: 05:00</span><span class='lang lang-zh'>换日时间：05:00</span></span>
-        <span class="chip"><span class='lang lang-en'>Generated: 2026-06-15 15:21:05 CST</span><span class='lang lang-zh'>生成时间：2026-06-15 15:21:05 CST</span></span>
+        <span class="chip"><span class='lang lang-en'>Generated: 2026-06-15 17:39:38 CST</span><span class='lang lang-zh'>生成时间：2026-06-15 17:39:38 CST</span></span>
       </div>
     </section>
 
@@ -738,6 +738,95 @@
       return sources.map(([label]) => label);
     }
 
+    function parseDayLabel(label) {
+      const [year, month, day] = label.split('-').map(Number);
+      return new Date(Date.UTC(year, month - 1, day));
+    }
+
+    function formatDayLabel(date) {
+      return [
+        date.getUTCFullYear(),
+        String(date.getUTCMonth() + 1).padStart(2, '0'),
+        String(date.getUTCDate()).padStart(2, '0'),
+      ].join('-');
+    }
+
+    function parseMonthLabel(label) {
+      const [year, month] = label.split('-').map(Number);
+      return new Date(Date.UTC(year, month - 1, 1));
+    }
+
+    function formatMonthLabel(date) {
+      return [
+        date.getUTCFullYear(),
+        String(date.getUTCMonth() + 1).padStart(2, '0'),
+      ].join('-');
+    }
+
+    function parseWeekLabel(label) {
+      const [yearText, weekText] = label.split('-W');
+      const year = Number(yearText);
+      const week = Number(weekText);
+      const jan4 = new Date(Date.UTC(year, 0, 4));
+      const jan4Day = jan4.getUTCDay() || 7;
+      const monday = new Date(jan4);
+      monday.setUTCDate(jan4.getUTCDate() - jan4Day + 1 + (week - 1) * 7);
+      return monday;
+    }
+
+    function formatWeekLabel(date) {
+      const current = new Date(Date.UTC(
+        date.getUTCFullYear(),
+        date.getUTCMonth(),
+        date.getUTCDate()
+      ));
+      const day = current.getUTCDay() || 7;
+      current.setUTCDate(current.getUTCDate() + 4 - day);
+      const yearStart = new Date(Date.UTC(current.getUTCFullYear(), 0, 1));
+      const week = Math.ceil((((current - yearStart) / 86400000) + 1) / 7);
+      return `${current.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+    }
+
+    function continuousPeriodLabels(startLabel, endLabel) {
+      const labels = [];
+      if (state.period === 'month') {
+        const cursor = parseMonthLabel(startLabel);
+        const end = parseMonthLabel(endLabel);
+        while (cursor <= end) {
+          labels.push(formatMonthLabel(cursor));
+          cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+        }
+        return labels;
+      }
+      if (state.period === 'week') {
+        const cursor = parseWeekLabel(startLabel);
+        const end = parseWeekLabel(endLabel);
+        while (cursor <= end) {
+          labels.push(formatWeekLabel(cursor));
+          cursor.setUTCDate(cursor.getUTCDate() + 7);
+        }
+        return labels;
+      }
+      const cursor = parseDayLabel(startLabel);
+      const end = parseDayLabel(endLabel);
+      while (cursor <= end) {
+        labels.push(formatDayLabel(cursor));
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+      return labels;
+    }
+
+    function fillMissingPeriods(periods) {
+      if (!periods.length) return periods;
+      const byPeriod = new Map(periods.map((period) => [period.period, period]));
+      return continuousPeriodLabels(periods[0].period, periods[periods.length - 1].period)
+        .map((period) => byPeriod.get(period) || {
+          period,
+          counter: new Map(),
+          total: 0,
+        });
+    }
+
     function maybePeriodLabel(index, total, label) {
       const every = Math.max(1, Math.ceil(total / 12));
       return index % every === 0 || index === total - 1 ? label : '';
@@ -782,7 +871,10 @@
       const chartHtml = `
         <div class="column-chart" style="--bar-count:${periods.length}">
           ${periods.map((period, index) => {
-            const height = Math.max((period.total / max) * 100, 2);
+            const height = period.total > 0 ? Math.max((period.total / max) * 100, 2) : 0;
+            const barStyle = period.total > 0
+              ? `height:${height.toFixed(2)}%`
+              : 'height:0; border:none; background:transparent';
             const pieces = sourceLabels
               .map((label) => ({
                 label,
@@ -794,7 +886,7 @@
             return `
               <div class="time-column">
                 <div class="time-bar-slot">
-                  <div class="stack-bar" style="height:${height.toFixed(2)}%">
+                  <div class="stack-bar" style="${barStyle}">
                     ${pieces.map((piece) => {
                       const segmentHeight = Math.max((piece.count / period.total) * 100, 1);
                       const share = ((piece.count / period.total) * 100).toFixed(1);
@@ -850,7 +942,7 @@
     function render() {
       const records = filteredRecords();
       const { periods, sources } = buildGroups(records);
-      renderStackChart(periods, sourceLabels(sources));
+      renderStackChart(fillMissingPeriods(periods), sourceLabels(sources));
       renderTable(periods);
       resultCount.textContent = `${periods.length.toLocaleString()} ${t('periods')}`;
       updateLocalizableAttrs();
