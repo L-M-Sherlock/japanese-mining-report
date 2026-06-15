@@ -262,6 +262,13 @@ def guess_work_label(source: str) -> str:
     return work or source
 
 
+def normalize_novel_work_label(work: str) -> str:
+    work = normalize_spaces(work)
+    work = re.sub(r"\s+\([^)]*\)$", "", work)
+    work = re.sub(r"(?<=[^\s0-9０-９])\s*[0-9０-９]+(?=\s*(?:[～〜]|$))", "", work)
+    return normalize_spaces(work).strip(" -._") or work
+
+
 def has_hoshi_tag(tags: str) -> bool:
     return any(tag.casefold() == "hoshi" for tag in tags.split())
 
@@ -387,7 +394,10 @@ def load_records(
         source = extract_source_label(lines)
         url = extract_url(lines)
         domain = extract_domain(url)
+        source_category = classify_source_category(raw_source, source, tags or "")
         work = guess_work_label(source)
+        if source_category == "novel":
+            work = normalize_novel_work_label(work)
 
         records.append(
             Record(
@@ -403,7 +413,7 @@ def load_records(
                 url=url,
                 deck=deck_name,
                 studied=reps > 0,
-                source_category=classify_source_category(raw_source, source, tags or ""),
+                source_category=source_category,
             )
         )
 

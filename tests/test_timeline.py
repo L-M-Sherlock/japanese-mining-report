@@ -12,6 +12,7 @@ from scripts.visualize_lapis_sources import (
     classify_source_category,
     collection_day_start_hour,
     mined_datetime_from_note_id,
+    normalize_novel_work_label,
     timeline_summary,
     unique_note_records,
 )
@@ -69,6 +70,22 @@ class TimelineTests(unittest.TestCase):
         )
         self.assertEqual(
             classify_source_category("#about＆rules", "#about＆rules", ""), "other"
+        )
+
+    def test_normalize_novel_work_label_merges_volumes(self) -> None:
+        self.assertEqual(
+            normalize_novel_work_label(
+                "週に一度クラスメイトを買う話２ ～ふたりの時間、言い訳の五千円～"
+            ),
+            "週に一度クラスメイトを買う話 ～ふたりの時間、言い訳の五千円～",
+        )
+        self.assertEqual(
+            normalize_novel_work_label("好きな子のいもうと２"),
+            "好きな子のいもうと",
+        )
+        self.assertEqual(
+            normalize_novel_work_label("クラスの姫は私のわんこ２"),
+            "クラスの姫は私のわんこ",
         )
 
     def test_collection_day_start_hour_reads_anki_rollover(self) -> None:
