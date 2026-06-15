@@ -499,7 +499,7 @@
         <span class="chip"><span class='lang lang-en'>Deck filter: (all decks with matching note type)</span><span class='lang lang-zh'>牌组筛选：（匹配该笔记类型的全部牌组）</span></span>
         <span class="chip"><span class='lang lang-en'>Timezone: CST</span><span class='lang lang-zh'>时区：CST</span></span>
         <span class="chip"><span class='lang lang-en'>Day starts: 05:00</span><span class='lang lang-zh'>换日时间：05:00</span></span>
-        <span class="chip"><span class='lang lang-en'>Generated: 2026-06-15 17:39:38 CST</span><span class='lang lang-zh'>生成时间：2026-06-15 17:39:38 CST</span></span>
+        <span class="chip"><span class='lang lang-en'>Generated: 2026-06-15 17:47:08 CST</span><span class='lang lang-zh'>生成时间：2026-06-15 17:47:08 CST</span></span>
       </div>
     </section>
 
@@ -666,12 +666,12 @@
       const margin = 12;
       const rect = hoverTooltip.getBoundingClientRect();
       let left = clientX + margin;
-      let top = clientY + margin;
+      let top = clientY - rect.height - margin;
       if (left + rect.width > window.innerWidth - margin) {
         left = clientX - rect.width - margin;
       }
-      if (top + rect.height > window.innerHeight - margin) {
-        top = clientY - rect.height - margin;
+      if (top < margin) {
+        top = clientY + margin;
       }
       hoverTooltip.style.transform =
         `translate(${Math.max(margin, left)}px, ${Math.max(margin, top)}px)`;
