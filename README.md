@@ -111,7 +111,8 @@ uv run scripts/visualize_lapis_sources.py \
   --top 30 \
   --output output/lapis_source_report.html \
   --timeline-output output/lapis_mining_timeline_report.html \
-  --timezone Asia/Shanghai
+  --timezone Asia/Shanghai \
+  --before-date 2026-03-01
 ```
 
 - `--db`: explicit path to the Anki collection database
@@ -124,6 +125,7 @@ uv run scripts/visualize_lapis_sources.py \
 - `--timeline-output`: output HTML path for the mining timeline report
 - `--timezone`: timezone used to group note creation dates, default system local timezone
 - `--day-start-hour`: optional override for the hour when a mining day starts; by default this follows Anki's collection rollover setting, falling back to `4` if unavailable
+- `--before-date`: print mined/studied card counts before a mining date without changing the generated reports
 
 The timeline report counts unique notes, not review events. For the default `Lapis` setup, one note corresponds to one mined word. Dates come from Anki note IDs, which are creation timestamps in milliseconds. Notes created before Anki's rollover hour are counted toward the previous mining day. Learning status is intentionally left to the source report.
 

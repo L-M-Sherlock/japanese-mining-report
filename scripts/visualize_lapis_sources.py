@@ -140,6 +140,15 @@ def parse_args() -> argparse.Namespace:
             "inferred from the parent directory of collection.anki2."
         ),
     )
+    parser.add_argument(
+        "--before-date",
+        default="",
+        help=(
+            "Print mined/studied card counts before this mining date "
+            "(YYYY-MM-DD). The boundary uses the selected timezone and "
+            "Anki rollover/day-start hour."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -563,6 +572,47 @@ def build_period_labels(
         f"{iso_year}-W{iso_week:02d}",
         f"{mined_day.year}-{mined_day.month:02d}",
     )
+
+
+def parse_before_date_cutoff(
+    before_date: str, time_zone, day_start_hour: int
+) -> datetime:
+    before_date = before_date.strip()
+    try:
+        date_value = datetime.strptime(before_date, "%Y-%m-%d").date()
+    except ValueError as error:
+        raise SystemExit("--before-date must use YYYY-MM-DD format.") from error
+    return datetime(
+        date_value.year,
+        date_value.month,
+        date_value.day,
+        day_start_hour,
+        tzinfo=time_zone,
+    )
+
+
+def before_date_counts(
+    conn: sqlite3.Connection,
+    records: list[Record],
+    cutoff: datetime,
+) -> tuple[int, int]:
+    cutoff_ms = int(cutoff.timestamp() * 1000)
+    mined_card_ids = {
+        record.card_id
+        for record in records
+        if int(record.mined_at.timestamp() * 1000) < cutoff_ms
+    }
+    if not mined_card_ids:
+        return 0, 0
+
+    studied_card_ids = {
+        int(row[0])
+        for row in conn.execute(
+            "select distinct cid from revlog where id < ?",
+            (cutoff_ms,),
+        )
+    }
+    return len(mined_card_ids), len(mined_card_ids & studied_card_ids)
 
 
 def load_records(
@@ -2668,6 +2718,14 @@ def main() -> int:
         if not records:
             raise SystemExit("No matching cards found.")
 
+        before_date_summary: tuple[datetime, int, int] | None = None
+        if args.before_date:
+            cutoff = parse_before_date_cutoff(
+                args.before_date, time_zone, day_start_hour
+            )
+            mined_before, studied_before = before_date_counts(conn, records, cutoff)
+            before_date_summary = (cutoff, mined_before, studied_before)
+
         output_path = args.output.resolve()
         timeline_output_path = args.timeline_output.resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2701,6 +2759,13 @@ def main() -> int:
         f"Wrote {len(unique_note_records(records)):,} mined notes to "
         f"{timeline_output_path}"
     )
+    if before_date_summary is not None:
+        cutoff, mined_before, studied_before = before_date_summary
+        print(
+            f"Before {args.before_date} "
+            f"({cutoff.strftime('%Y-%m-%d %H:%M:%S %Z')}): "
+            f"mined {mined_before:,} cards, studied {studied_before:,} cards."
+        )
     if args.publish_pages:
         branch = publish_reports_to_pages(
             source_report=output_path,

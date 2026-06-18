@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from scripts.visualize_lapis_sources import (
     Record,
     aggregate_timeline_counts,
+    before_date_counts,
     build_pages_branch_name,
     build_period_labels,
     classify_source_category,
@@ -18,6 +19,7 @@ from scripts.visualize_lapis_sources import (
     infer_profile_name_from_db,
     mined_datetime_from_note_id,
     normalize_novel_work_label,
+    parse_before_date_cutoff,
     publish_reports_to_pages,
     timeline_summary,
     unique_note_records,
@@ -139,6 +141,37 @@ class TimelineTests(unittest.TestCase):
 
         self.assertEqual(before_four[0], "2026-06-11")
         self.assertEqual(at_four[0], "2026-06-12")
+
+    def test_before_date_cutoff_uses_day_start_hour(self) -> None:
+        cutoff = parse_before_date_cutoff("2026-06-12", ZoneInfo("Asia/Shanghai"), 5)
+
+        self.assertEqual(cutoff.isoformat(), "2026-06-12T05:00:00+08:00")
+
+    def test_before_date_counts_mined_and_studied_cards(self) -> None:
+        tz = ZoneInfo("Asia/Shanghai")
+        cutoff = parse_before_date_cutoff("2026-06-12", tz, 5)
+        records = [
+            make_record(1, datetime(2026, 6, 11, 10, 0, tzinfo=tz), "Work A", "A"),
+            make_record(2, datetime(2026, 6, 12, 4, 59, tzinfo=tz), "Work A", "B"),
+            make_record(3, datetime(2026, 6, 12, 5, 0, tzinfo=tz), "Work B", "C"),
+        ]
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                "create table revlog (id integer primary key, cid integer not null)"
+            )
+            conn.executemany(
+                "insert into revlog (id, cid) values (?, ?)",
+                [
+                    (int(datetime(2026, 6, 11, 12, 0, tzinfo=tz).timestamp() * 1000), 1),
+                    (int(datetime(2026, 6, 12, 6, 0, tzinfo=tz).timestamp() * 1000), 2),
+                    (int(datetime(2026, 6, 11, 12, 0, tzinfo=tz).timestamp() * 1000) + 1, 99),
+                ],
+            )
+
+            self.assertEqual(before_date_counts(conn, records, cutoff), (2, 1))
+        finally:
+            conn.close()
 
     def test_unique_note_records_deduplicates_multi_card_notes(self) -> None:
         mined_at = datetime(2026, 6, 12, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
