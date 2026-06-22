@@ -12,6 +12,7 @@ from scripts.visualize_lapis_sources import (
     Record,
     aggregate_timeline_counts,
     before_date_counts,
+    build_html,
     build_pages_branch_name,
     build_period_labels,
     classify_source_category,
@@ -21,6 +22,8 @@ from scripts.visualize_lapis_sources import (
     normalize_novel_work_label,
     parse_before_date_cutoff,
     publish_reports_to_pages,
+    render_pages_index,
+    render_timeline_html,
     timeline_summary,
     unique_note_records,
     validate_pages_branch_name,
@@ -231,6 +234,42 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(summary["maxDay"], "2026-06-01")
         self.assertEqual(summary["maxDayWords"], 2)
         self.assertEqual(summary["averagePerActiveDay"], 1.5)
+
+
+class HtmlStyleTests(unittest.TestCase):
+    def assert_dashboard_theme(self, html: str) -> None:
+        self.assertIn("--surface-2: #f0ede6", html)
+        self.assertIn("font-family: ui-sans-serif", html)
+        self.assertIn("border-radius: 8px", html)
+        self.assertNotIn("Iowan Old Style", html)
+        self.assertNotIn("Palatino Linotype", html)
+        self.assertNotIn("radial-gradient", html)
+        self.assertNotIn("backdrop-filter", html)
+        self.assertNotIn("border-radius: 14px", html)
+        self.assertNotIn("border-radius: 18px", html)
+        self.assertNotIn("border-radius: 20px", html)
+
+    def test_source_and_timeline_reports_use_dashboard_theme(self) -> None:
+        tz = ZoneInfo("Asia/Shanghai")
+        records = [
+            make_record(1, datetime(2026, 6, 1, 9, 0, tzinfo=tz), "Work A", "A"),
+            make_record(2, datetime(2026, 6, 2, 10, 0, tzinfo=tz), "Work B", "B"),
+        ]
+
+        source_html = build_html(records, "Lapis", "", 10)
+        timeline_html = render_timeline_html(records, "Lapis", "", "Asia/Shanghai", 4)
+
+        self.assert_dashboard_theme(source_html)
+        self.assert_dashboard_theme(timeline_html)
+        self.assertIn("lapis_mining_timeline_report.html", source_html)
+        self.assertIn("lapis_source_report.html", timeline_html)
+
+    def test_pages_index_uses_dashboard_theme(self) -> None:
+        index_html = render_pages_index("JarrettYe")
+
+        self.assert_dashboard_theme(index_html)
+        self.assertIn("Timeline report", index_html)
+        self.assertIn("Source report", index_html)
 
 
 class PublishPagesTests(unittest.TestCase):
