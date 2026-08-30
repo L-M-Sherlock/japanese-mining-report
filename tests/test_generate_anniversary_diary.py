@@ -1,10 +1,15 @@
 from datetime import date, datetime, timedelta
+import sqlite3
 import unittest
 
 from scripts.generate_anniversary_diary import (
+    HistoricalCardIdentity,
     MiningRecord,
     TIME_ZONE,
     allocate_anime_days,
+    deck_label,
+    exclude_historical_card,
+    load_anki_days,
 )
 
 
@@ -61,3 +66,80 @@ class AnimeViewingTests(unittest.TestCase):
         self.assertEqual({row["viewing_index"] for row in second_rows}, {2})
         self.assertEqual({row["mode"] for row in first_rows}, {"日语字幕"})
         self.assertEqual({row["mode"] for row in second_rows}, {"无字幕"})
+
+
+class HistoricalCardTests(unittest.TestCase):
+    def identity(self, deck_name: str) -> HistoricalCardIdentity:
+        return HistoricalCardIdentity(
+            card_id=1,
+            note_id=1,
+            deck_name=deck_name,
+            note_type="Example",
+            template_ord=0,
+            fields="",
+            tags="",
+            backup_name="backup.colpkg",
+        )
+
+    def test_missing_cards_are_not_assumed_to_be_jlab(self) -> None:
+        self.assertEqual(deck_label(None), "历史卡（来源未恢复）")
+        self.assertEqual(
+            deck_label(
+                "ALL\x1fLearning\x1f日本語\x1fJlab's beginner course\x1f"
+                "Part 1: Listening comprehension"
+            ),
+            "jlab's beginner course",
+        )
+
+    def test_confirmed_english_history_is_excluded(self) -> None:
+        bitcoin = self.identity(
+            "michaelnielsen.org - How the bitcoin protocol actually works"
+        )
+        jlab = self.identity(
+            "ALL\x1fLearning\x1f日本語\x1fJlab's beginner course"
+        )
+        self.assertTrue(exclude_historical_card(bitcoin))
+        self.assertFalse(exclude_historical_card(jlab))
+        self.assertFalse(exclude_historical_card(None))
+
+    def test_load_anki_days_filters_confirmed_english_history(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            """
+            create table revlog (id integer, cid integer, time integer);
+            create table cards (id integer, did integer);
+            create table decks (id integer, name text);
+            """
+        )
+        first = int(datetime(2025, 8, 29, 12, tzinfo=TIME_ZONE).timestamp() * 1000)
+        conn.executemany(
+            "insert into revlog (id, cid, time) values (?, ?, ?)",
+            [(first, 1, 10_000), (first + 1, 2, 20_000)],
+        )
+        bitcoin = self.identity(
+            "michaelnielsen.org - How the bitcoin protocol actually works"
+        )
+        unknown = HistoricalCardIdentity(
+            card_id=2,
+            note_id=2,
+            deck_name="",
+            note_type="",
+            template_ord=0,
+            fields="",
+            tags="",
+            backup_name="backup.colpkg",
+        )
+
+        days, summary = load_anki_days(
+            conn,
+            date(2025, 8, 29),
+            date(2025, 8, 29),
+            {1: bitcoin, 2: unknown},
+        )
+        conn.close()
+
+        self.assertEqual(summary["review_count"], 1)
+        self.assertEqual(summary["first_review_total"], 1)
+        self.assertEqual(summary["excluded_cards"], 1)
+        self.assertEqual(summary["excluded_review_count"], 1)
+        self.assertEqual(days[date(2025, 8, 29)]["first_cards"], {"历史卡（来源未恢复）": 1})

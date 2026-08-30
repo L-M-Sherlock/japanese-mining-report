@@ -8,8 +8,12 @@ import html
 import importlib.util
 import json
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
+import tempfile
+import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -41,6 +45,7 @@ DEFAULT_END = date(2026, 8, 28)
 DEFAULT_ANKI_DB = Path(
     "/Users/jarrettye/Library/Application Support/Anki2/JarrettYe/collection.anki2"
 )
+DEFAULT_BACKUPS_DIR = DEFAULT_ANKI_DB.parent / "backups"
 DEFAULT_BOOKS_DIR = Path("/Users/jarrettye/Library/Application Support/Books")
 DEFAULT_READING_SCRIPT = Path(
     "/Users/jarrettye/Codes/japanese-reading-stats/scripts/visualize_books.py"
@@ -77,9 +82,22 @@ class AnimeEvent:
     position_seconds: int | None
 
 
+@dataclass(frozen=True)
+class HistoricalCardIdentity:
+    card_id: int
+    note_id: int
+    deck_name: str
+    note_type: str
+    template_ord: int
+    fields: str
+    tags: str
+    backup_name: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_ANKI_DB)
+    parser.add_argument("--backups-dir", type=Path, default=DEFAULT_BACKUPS_DIR)
     parser.add_argument("--books-dir", type=Path, default=DEFAULT_BOOKS_DIR)
     parser.add_argument("--reading-script", type=Path, default=DEFAULT_READING_SCRIPT)
     parser.add_argument(
@@ -157,9 +175,11 @@ def format_minutes(seconds: float) -> str:
 
 def deck_label(deck_name: str | None) -> str:
     if not deck_name:
-        return "jlab's beginner course"
+        return "历史卡（来源未恢复）"
     leaf = deck_name.split("\x1f")[-1]
     level_match = re.search(r"N([1-5])", leaf, re.IGNORECASE)
+    if "jlab's beginner course" in deck_name.casefold():
+        return "jlab's beginner course"
     if "Blue Book" in deck_name and "文法カード" in deck_name:
         level = level_match.group(1) if level_match else "?"
         return f"蓝宝书 N{level}·文法"
@@ -177,9 +197,119 @@ def deck_label(deck_name: str | None) -> str:
     return leaf.replace("::", "·")
 
 
-def load_anki_days(
+def find_missing_card_ids(
     conn: sqlite3.Connection, start: date, end: date
+) -> set[int]:
+    start_ms, end_ms = day_bounds_ms(start, end)
+    return {
+        int(row[0])
+        for row in conn.execute(
+            """
+            select distinct r.cid
+            from revlog r
+            left join cards c on c.id = r.cid
+            where r.id >= ? and r.id < ? and c.id is null
+            """,
+            (start_ms, end_ms),
+        )
+    }
+
+
+def recover_historical_card_identities(
+    backups_dir: Path, card_ids: Iterable[int]
+) -> dict[int, HistoricalCardIdentity]:
+    """Recover deleted cards from the first local collection backup containing them."""
+    unresolved = {int(card_id) for card_id in card_ids}
+    recovered: dict[int, HistoricalCardIdentity] = {}
+    if not unresolved or not backups_dir.exists():
+        return recovered
+    zstd = shutil.which("zstd")
+    if zstd is None:
+        return recovered
+
+    for backup in sorted(backups_dir.glob("backup-*.colpkg")):
+        if not unresolved:
+            break
+        try:
+            with tempfile.TemporaryDirectory(prefix="anniversary-backup-") as temp_name:
+                temp_dir = Path(temp_name)
+                compressed = temp_dir / "collection.anki21b"
+                database = temp_dir / "collection.anki2"
+                with zipfile.ZipFile(backup) as archive:
+                    if "collection.anki21b" not in archive.namelist():
+                        continue
+                    with archive.open("collection.anki21b") as source, compressed.open(
+                        "wb"
+                    ) as destination:
+                        shutil.copyfileobj(source, destination)
+                subprocess.run(
+                    [zstd, "-q", "-d", str(compressed), "-o", str(database)],
+                    check=True,
+                )
+                backup_conn = sqlite3.connect(database)
+                try:
+                    backup_conn.execute(
+                        "create temp table wanted_cards (cid integer primary key)"
+                    )
+                    backup_conn.executemany(
+                        "insert into wanted_cards (cid) values (?)",
+                        ((card_id,) for card_id in unresolved),
+                    )
+                    rows = backup_conn.execute(
+                        """
+                        select c.id, c.nid, d.name, nt.name, c.ord, n.flds, n.tags
+                        from wanted_cards w
+                        join cards c on c.id = w.cid
+                        left join decks d on d.id = c.did
+                        left join notes n on n.id = c.nid
+                        left join notetypes nt on nt.id = n.mid
+                        """
+                    ).fetchall()
+                finally:
+                    backup_conn.close()
+        except (OSError, sqlite3.Error, subprocess.CalledProcessError, zipfile.BadZipFile):
+            continue
+
+        for card_id, note_id, deck_name, note_type, template_ord, fields, tags in rows:
+            identity = HistoricalCardIdentity(
+                card_id=int(card_id),
+                note_id=int(note_id),
+                deck_name=str(deck_name or ""),
+                note_type=str(note_type or ""),
+                template_ord=int(template_ord or 0),
+                fields=str(fields or ""),
+                tags=str(tags or ""),
+                backup_name=backup.name,
+            )
+            recovered[identity.card_id] = identity
+            unresolved.discard(identity.card_id)
+    return recovered
+
+
+def exclude_historical_card(identity: HistoricalCardIdentity | None) -> bool:
+    if identity is None:
+        return False
+    return "bitcoin protocol actually works" in identity.deck_name.casefold()
+
+
+def resolved_deck_label(
+    card_id: int,
+    raw_deck: str | None,
+    historical_cards: dict[int, HistoricalCardIdentity],
+) -> str:
+    if raw_deck is not None:
+        return deck_label(raw_deck)
+    identity = historical_cards.get(card_id)
+    return deck_label(identity.deck_name if identity is not None else None)
+
+
+def load_anki_days(
+    conn: sqlite3.Connection,
+    start: date,
+    end: date,
+    historical_cards: dict[int, HistoricalCardIdentity] | None = None,
 ) -> tuple[dict[date, dict[str, Any]], dict[str, Any]]:
+    historical_cards = historical_cards or {}
     start_ms, end_ms = day_bounds_ms(start, end)
     days: dict[date, dict[str, Any]] = defaultdict(
         lambda: {
@@ -205,20 +335,34 @@ def load_anki_days(
         """,
         (start_ms, end_ms),
     )
+    excluded_cards: set[int] = set()
+    excluded_review_count = 0
+    excluded_seconds = 0.0
     for revlog_id, card_id, answer_ms, raw_deck in rows:
+        card_id = int(card_id)
+        answer_seconds = max(0, int(answer_ms)) / 1000
+        identity = historical_cards.get(card_id) if raw_deck is None else None
+        if exclude_historical_card(identity):
+            excluded_cards.add(card_id)
+            excluded_review_count += 1
+            excluded_seconds += answer_seconds
+            continue
         reviewed_at = datetime.fromtimestamp(int(revlog_id) / 1000, TIME_ZONE)
         day = reviewed_at.date()
-        label = deck_label(str(raw_deck) if raw_deck is not None else None)
-        answer_seconds = max(0, int(answer_ms)) / 1000
+        label = resolved_deck_label(
+            card_id,
+            str(raw_deck) if raw_deck is not None else None,
+            historical_cards,
+        )
         bucket = days[day]
         bucket["seconds"] += answer_seconds
         bucket["review_count"] += 1
-        bucket["cards"].add(int(card_id))
+        bucket["cards"].add(card_id)
         bucket["times"].append(reviewed_at)
         deck = bucket["decks"][label]
         deck["seconds"] += answer_seconds
         deck["reviews"] += 1
-        deck["cards"].add(int(card_id))
+        deck["cards"].add(card_id)
 
     first_rows = conn.execute(
         """
@@ -234,12 +378,20 @@ def load_anki_days(
         """
     )
     first_review_total = 0
-    for _card_id, first_id, raw_deck in first_rows:
+    for card_id, first_id, raw_deck in first_rows:
         if not start_ms <= int(first_id) < end_ms:
+            continue
+        card_id = int(card_id)
+        identity = historical_cards.get(card_id) if raw_deck is None else None
+        if exclude_historical_card(identity):
             continue
         reviewed_at = datetime.fromtimestamp(int(first_id) / 1000, TIME_ZONE)
         days[reviewed_at.date()]["first_cards"][
-            deck_label(str(raw_deck) if raw_deck is not None else None)
+            resolved_deck_label(
+                card_id,
+                str(raw_deck) if raw_deck is not None else None,
+                historical_cards,
+            )
         ] += 1
         first_review_total += 1
 
@@ -252,6 +404,9 @@ def load_anki_days(
         if days
         else 0,
         "first_review_total": first_review_total,
+        "excluded_cards": len(excluded_cards),
+        "excluded_review_count": excluded_review_count,
+        "excluded_seconds": excluded_seconds,
         "active_days": sum(bucket["review_count"] > 0 for bucket in days.values()),
         "first_time": min(
             reviewed_at
@@ -1139,9 +1294,9 @@ def generate_report(
         "",
         "- 日记按 Asia/Shanghai 的自然日 00:00—24:00 分组。卡片软件本身的换日时间是 05:00，"
         "所以极少数凌晨记录与软件界面中的“学习日”可能相差一天；这里统一采用日历日期，更适合作为日记。",
-        "- 卡片时间沿用此前年度趋势图的口径：统计这一资料库在窗口内的全部答题历史。"
-        "当前仍存在的非根牌组全部属于日语；无法从当前牌组表还原归属的历史卡，依据现有判断统一归为 "
-        "jlab's beginner course。"
+        "- 卡片时间沿用此前年度趋势图的口径：统计这一资料库在窗口内的日语卡片答题历史。"
+        "当前卡片已不存在时，优先使用本地自动备份恢复原牌组；确认属于英文比特币课程的历史卡不计入，"
+        "仍无法恢复的卡单列为“历史卡（来源未恢复）”。"
         "时间是每次答题的实际计时之和，不把两次答题之间的休息算进去；“首次进入复习”按该卡全部历史中的第一条答题记录判断。",
         "- Kaishi 的“新学表达”同样以每张卡全部历史中的第一条答题记录为准；列表保留词面，"
         "词面与读音不同时附上读音，不列释义、例句或来源。",
@@ -1241,13 +1396,20 @@ def main() -> None:
     db_path = args.db.expanduser().resolve()
     if not db_path.exists():
         raise SystemExit(f"Anki database not found: {db_path}")
+    backups_dir = args.backups_dir.expanduser().resolve()
 
     temp_dir, snapshot = make_db_snapshot(db_path)
     try:
         conn = sqlite3.connect(snapshot)
         register_unicase(conn)
         try:
-            anki_days, anki_summary = load_anki_days(conn, args.start, args.end)
+            missing_card_ids = find_missing_card_ids(conn, args.start, args.end)
+            historical_cards = recover_historical_card_identities(
+                backups_dir, missing_card_ids
+            )
+            anki_days, anki_summary = load_anki_days(
+                conn, args.start, args.end, historical_cards
+            )
             kaishi_days, kaishi_summary = load_kaishi_days(
                 conn, args.start, args.end
             )
@@ -1297,6 +1459,12 @@ def main() -> None:
         "days": len(all_days),
         "ankiHours": round(anki_summary["seconds"] / 3600, 3),
         "ankiReviews": anki_summary["review_count"],
+        "ankiFirstReviewCards": anki_summary["first_review_total"],
+        "excludedHistoricalCards": anki_summary["excluded_cards"],
+        "excludedHistoricalReviews": anki_summary["excluded_review_count"],
+        "excludedHistoricalHours": round(anki_summary["excluded_seconds"] / 3600, 3),
+        "recoveredHistoricalCards": len(historical_cards),
+        "unresolvedHistoricalCards": len(missing_card_ids - historical_cards.keys()),
         "kaishiNewExpressions": kaishi_summary["count"],
         "kaishiActiveDays": kaishi_summary["active_days"],
         "minedExpressions": mining_summary["count"],
