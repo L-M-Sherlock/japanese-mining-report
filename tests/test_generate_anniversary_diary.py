@@ -7,6 +7,7 @@ from scripts.generate_anniversary_diary import (
     MiningRecord,
     TIME_ZONE,
     allocate_anime_days,
+    anime_edition_label,
     deck_label,
     exclude_historical_card,
     load_anki_days,
@@ -66,6 +67,23 @@ class AnimeViewingTests(unittest.TestCase):
         self.assertEqual({row["viewing_index"] for row in second_rows}, {2})
         self.assertEqual({row["mode"] for row in first_rows}, {"日语字幕"})
         self.assertEqual({row["mode"] for row in second_rows}, {"无字幕"})
+        self.assertEqual(summary["editions"], 2)
+        self.assertEqual(summary["edition_viewings"], 3)
+        self.assertEqual(summary["mode_editions"]["日语字幕"], {"Yuru Yuri"})
+        self.assertEqual(
+            summary["mode_editions"]["无字幕"],
+            {"Yuru Yuri", "剧场版 擅长捉弄人的高木同学"},
+        )
+
+    def test_anime_edition_label_keeps_seasons_separate(self) -> None:
+        self.assertEqual(
+            anime_edition_label("Karakai Jouzu no Takagi-san 2 第03集"),
+            "Karakai Jouzu no Takagi-san 2",
+        )
+        self.assertEqual(
+            anime_edition_label("剧场版 擅长捉弄人的高木同学"),
+            "剧场版 擅长捉弄人的高木同学",
+        )
 
 
 class HistoricalCardTests(unittest.TestCase):

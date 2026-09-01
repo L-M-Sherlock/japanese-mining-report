@@ -560,6 +560,13 @@ def short_anime_source(source: str) -> str:
     return compact_text(cleaned, 110) or compact_text(original, 110)
 
 
+def anime_edition_label(label: str) -> str:
+    """Remove an episode suffix from an already-normalized display label."""
+    return re.sub(
+        r"(?:\s+S\d{2}E\d{2}|\s+第\d{2}(?:话|集))$", "", label
+    ).strip()
+
+
 def canonical_anime_key(source: str) -> str:
     lowered = source.casefold()
     marker = episode_marker(source)
@@ -682,6 +689,9 @@ def allocate_anime_days(
     mode_seconds: Counter[str] = Counter()
     mode_entries: Counter[str] = Counter()
     works: set[str] = set()
+    edition_labels: set[str] = set()
+    edition_viewings: set[tuple[str, int]] = set()
+    mode_editions: dict[str, set[str]] = defaultdict(set)
     unique_entries = 0
 
     for key, group_events in groups.items():
@@ -702,7 +712,11 @@ def allocate_anime_days(
                 duration_seconds = 72 * 60 + 5
             mode = "无字幕" if events[0].mined_at >= subtitle_cutoff else "日语字幕"
             label = choose_canonical_label(events)
+            edition = anime_edition_label(label)
             works.add(guess_work_label(label))
+            edition_labels.add(edition)
+            edition_viewings.add((edition, viewing_index))
+            mode_editions[mode].add(edition)
 
             weights: Counter[date] = Counter()
             previous: int | None = None
@@ -735,6 +749,7 @@ def allocate_anime_days(
                     {
                         "key": viewing_key,
                         "label": label,
+                        "edition": edition,
                         "seconds": allocated,
                         "mode": mode,
                         "note_count": note_counts[active_day],
@@ -761,6 +776,9 @@ def allocate_anime_days(
         "mode_seconds": mode_seconds,
         "mode_entries": mode_entries,
         "mode_active_days": mode_active_days,
+        "editions": len(edition_labels),
+        "edition_viewings": len(edition_viewings),
+        "mode_editions": mode_editions,
         "subtitle_cutoff": subtitle_cutoff,
         "raw_source_count": len(
             {record.source for record in records if record.category == "anime"}
@@ -1197,12 +1215,14 @@ def render_summary_table(
         f"{anki_summary['first_review_total']:,} 张首次进入复习 |",
         f"| 看番（日语字幕） | {mode_seconds['日语字幕'] / 3600:.1f} 小时 | "
         f"{len(anime_summary['mode_active_days']['日语字幕'])} 天 | "
+        f"{len(anime_summary['mode_editions']['日语字幕']):,} 部；"
         f"{mode_entries['日语字幕']:,} 个观看集次 |",
         f"| 看番（无字幕） | {mode_seconds['无字幕'] / 3600:.1f} 小时 | "
         f"{len(anime_summary['mode_active_days']['无字幕'])} 天 | "
+        f"{len(anime_summary['mode_editions']['无字幕']):,} 部；"
         f"{mode_entries['无字幕']:,} 个观看集次 |",
         f"| 读轻小说 | {reading_summary['seconds'] / 3600:.1f} 小时 | {reading_summary['active_days']} 天 | "
-        f"{reading_summary['titles']:,} 本；{reading_summary['characters']:,.0f} 字 |",
+        f"{reading_summary['titles']:,} 册；{reading_summary['characters']:,.0f} 字 |",
         f"| **合计** | **{total_seconds / 3600:.1f} 小时** | **{day_count} 个自然日** | "
         f"日均 **{total_seconds / day_count / 60:.0f} 分钟** |",
     ]
@@ -1273,8 +1293,10 @@ def generate_report(
         f"- 看番按 TV/OVA 每个观看集次 24 分钟估算；《高木同学》剧场版按字幕进度的 "
         f"{format_duration(max(0, anime_summary['seconds'] - (anime_summary['entries'] - 1) * 24 * 60), seconds_precision=True)} "
         f"计。原始记录中有 {anime_summary['raw_source_count']:,} 个不同字幕源名，合并同一视频的 5 组别名后，"
-        f"全年共 **{anime_summary['unique_entries']:,} 个独立视频条目**；《摇曳百合》第 1 季的 12 集各观看两遍，"
-        f"因此合计 **{anime_summary['entries']:,} 个观看集次**。",
+        f"全年共 **{anime_summary['editions']:,} 部动画、{anime_summary['unique_entries']:,} 个独立视频条目**；"
+        f"《摇曳百合》第 1 季的 12 集各观看两遍，因而共有 **{anime_summary['edition_viewings']:,} 个观看轮次、"
+        f"{anime_summary['entries']:,} 个观看集次**。部数按季度、剧场版或独立版本去重；《摇曳百合》第 1 季"
+        "在两种字幕方式下各出现一次，所以两行看番部数相加会重复 1 部。",
         f"- 字幕分界点是 **{anime_summary['subtitle_cutoff']:%Y-%m-%d %H:%M:%S}**：此前按日语字幕，"
         "从《擅长捉弄人的高木同学》剧场版起（含该片）按无字幕。",
         f"- 挖词历史中的听力反馈从 **{listening_feedback_summary['first_date']:%Y-%m-%d}** 起覆盖 "
@@ -1471,6 +1493,7 @@ def main() -> None:
         "animeHours": round(anime_summary["seconds"] / 3600, 3),
         "animeEntries": anime_summary["entries"],
         "animeUniqueVideos": anime_summary["unique_entries"],
+        "animeEditions": anime_summary["editions"],
         "listeningFeedbackEpisodes": listening_feedback_summary["episodes"],
         "listeningFeedbackAnime": listening_feedback_summary["anime"],
         "listeningUnclearCues": listening_feedback_summary["unclear_cues"],
@@ -1480,6 +1503,7 @@ def main() -> None:
         "subtitledHours": round(anime_summary["mode_seconds"]["日语字幕"] / 3600, 3),
         "unsubtitledHours": round(anime_summary["mode_seconds"]["无字幕"] / 3600, 3),
         "readingHours": round(reading_summary["seconds"] / 3600, 3),
+        "readingVolumes": reading_summary["titles"],
         "readingCharacters": round(reading_summary["characters"]),
         "totalHours": round(
             (
