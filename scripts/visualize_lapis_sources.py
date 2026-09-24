@@ -17,6 +17,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+if __package__:
+    from .book_media import is_audiobook_source, load_audiobook_names
+else:
+    from book_media import is_audiobook_source, load_audiobook_names
+
 
 BR_RE = re.compile(r"<br\s*/?>", flags=re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
@@ -735,6 +740,11 @@ def parse_args() -> argparse.Namespace:
         help="Exact note type name to inspect. Default: %(default)s",
     )
     parser.add_argument(
+        "--books-dir", type=Path,
+        default=Path.home() / "Library/Application Support/Books",
+        help="Hoshi Reader library used to recognize audio-associated book sources.",
+    )
+    parser.add_argument(
         "--field",
         default="MiscInfo",
         help="Field name that stores source info. Default: %(default)s",
@@ -1129,7 +1139,12 @@ def has_hoshi_tag(tags: str) -> bool:
     return any(tag.casefold() == "hoshi" for tag in tags.split())
 
 
-def classify_source_category(raw_source: str, cleaned_source: str, tags: str) -> str:
+def classify_source_category(
+    raw_source: str, cleaned_source: str, tags: str, *,
+    sentence_audio: str = "", audiobook_names: frozenset[str] = frozenset(),
+) -> str:
+    if is_audiobook_source(cleaned_source, sentence_audio, audiobook_names):
+        return "audiobook"
     if has_hoshi_tag(tags):
         return "novel"
     if TIMESTAMP_RE.search(raw_source) or SUBTITLE_SOURCE_RE.search(cleaned_source):
@@ -1260,9 +1275,15 @@ def load_records(
     deck_contains: str,
     time_zone,
     day_start_hour: int = 4,
+    *,
+    audiobook_names: frozenset[str] = frozenset(),
 ) -> list[Record]:
     deck_filter = deck_contains.casefold().strip()
     records: list[Record] = []
+    audio_field = conn.execute(
+        "select ord from fields where ntid=? and name='SentenceAudio'", (note_type_id,)
+    ).fetchone()
+    audio_ord = int(audio_field[0]) if audio_field is not None else None
 
     rows = conn.execute(
         """
@@ -1291,9 +1312,13 @@ def load_records(
         source = extract_source_label(lines)
         url = extract_url(lines)
         domain = extract_domain(url)
-        source_category = classify_source_category(raw_source, source, tags or "")
+        source_category = classify_source_category(
+            raw_source, source, tags or "",
+            sentence_audio=fields[audio_ord] if audio_ord is not None and len(fields) > audio_ord else "",
+            audiobook_names=audiobook_names,
+        )
         work = guess_work_label(source)
-        if source_category == "novel":
+        if source_category in {"novel", "audiobook"}:
             work = normalize_novel_work_label(work)
 
         records.append(
@@ -2191,6 +2216,7 @@ def render_timeline_html(
             <button type="button" class="segmented-button active" data-category="all">{render_bilingual("All", "全部")}</button>
             <button type="button" class="segmented-button" data-category="anime">{render_bilingual("Anime", "动画")}</button>
             <button type="button" class="segmented-button" data-category="novel">{render_bilingual("Novel", "小说")}</button>
+            <button type="button" class="segmented-button" data-category="audiobook">{render_bilingual("Audiobook", "有声书")}</button>
           </span>
         </div>
         <label for="sourceFilter">
@@ -2546,6 +2572,7 @@ def main() -> int:
             args.deck_contains,
             time_zone,
             day_start_hour,
+            audiobook_names=load_audiobook_names(args.books_dir),
         )
 
         if not records:

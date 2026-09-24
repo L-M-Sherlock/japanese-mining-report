@@ -37,6 +37,7 @@ from scripts.visualize_lapis_sources import (
     register_unicase,
     strip_misc_html,
 )
+from scripts.book_media import audiobook_evidence, load_audiobook_names
 
 
 TIME_ZONE = ZoneInfo("Asia/Shanghai")
@@ -580,12 +581,14 @@ def canonical_anime_key(source: str) -> str:
 
 
 def load_mining_records(
-    conn: sqlite3.Connection, start: date, end: date
+    conn: sqlite3.Connection, start: date, end: date, *, books_dir: Path = DEFAULT_BOOKS_DIR,
 ) -> tuple[dict[date, list[MiningRecord]], dict[str, Any]]:
     note_type_id = find_note_type_id(conn, "Lapis")
     expression_ord = find_field_ord(conn, note_type_id, "Expression")
     sentence_ord = find_field_ord(conn, note_type_id, "Sentence")
     misc_ord = find_field_ord(conn, note_type_id, "MiscInfo")
+    audio_ord = find_field_ord(conn, note_type_id, "SentenceAudio")
+    audiobook_names = load_audiobook_names(books_dir)
     start_ms, end_ms = day_bounds_ms(start, end)
     days: dict[date, list[MiningRecord]] = defaultdict(list)
     all_records: list[MiningRecord] = []
@@ -605,9 +608,13 @@ def load_mining_records(
         lines = strip_misc_html(misc)
         raw_source = lines[0] if lines else ""
         source = extract_source_label(lines)
-        category = classify_source_category(raw_source, source, str(tags or ""))
+        category = classify_source_category(
+            raw_source, source, str(tags or ""),
+            sentence_audio=fields[audio_ord] if len(fields) > audio_ord else "",
+            audiobook_names=audiobook_names,
+        )
         work = guess_work_label(source)
-        if category == "novel":
+        if category in {"novel", "audiobook"}:
             work = normalize_novel_work_label(work)
         source_display = (
             short_anime_source(source)
@@ -803,7 +810,8 @@ def load_reading_days(
 ) -> tuple[dict[date, list[dict[str, Any]]], dict[str, Any]]:
     module = import_reading_module(reading_script)
     library = module.load_library(books_dir, TIME_ZONE)
-    nested: dict[date, dict[str, dict[str, float]]] = defaultdict(
+    evidence = {book.id: audiobook_evidence(book.folder_path) for book in library.books}
+    nested: dict[date, dict[tuple[str, str], dict[str, float]]] = defaultdict(
         lambda: defaultdict(lambda: {"seconds": 0.0, "characters": 0.0})
     )
     record_count = 0
@@ -811,7 +819,7 @@ def load_reading_days(
         stat_day = date.fromisoformat(stat.date_key)
         if not start <= stat_day <= end:
             continue
-        row = nested[stat_day][stat.title]
+        row = nested[stat_day][(stat.book_id, stat.title)]
         row["seconds"] += float(stat.reading_time_seconds)
         row["characters"] += float(stat.characters_read)
         record_count += 1
@@ -819,12 +827,15 @@ def load_reading_days(
     days: dict[date, list[dict[str, Any]]] = {}
     for stat_day, titles in nested.items():
         rows = []
-        for title, values in titles.items():
+        for (book_id, title), values in titles.items():
             seconds = values["seconds"]
             characters = values["characters"]
             rows.append(
                 {
+                    "book_id": book_id,
                     "title": title,
+                    "category": evidence[book_id]["category"],
+                    "media_status": evidence[book_id]["status"],
                     "seconds": seconds,
                     "characters": characters,
                     "speed": characters / (seconds / 3600) if seconds > 0 else 0,
@@ -833,12 +844,24 @@ def load_reading_days(
         days[stat_day] = sorted(rows, key=lambda row: (-row["seconds"], row["title"]))
 
     all_rows = [row for rows in days.values() for row in rows]
+    categories = {}
+    for category in ("novel", "audiobook"):
+        selected = [row for row in all_rows if row["category"] == category]
+        categories[category] = {
+            "seconds": sum(row["seconds"] for row in selected),
+            "characters": sum(row["characters"] for row in selected),
+            "titles": len({row["book_id"] for row in selected}),
+            "active_days": sum(any(row["category"] == category for row in rows) for rows in days.values()),
+        }
     summary = {
         "seconds": sum(row["seconds"] for row in all_rows),
         "characters": sum(row["characters"] for row in all_rows),
         "titles": len({row["title"] for row in all_rows}),
         "active_days": len(days),
         "record_count": record_count,
+        "categories": categories,
+        "audiobook_titles": sorted({row["title"] for row in all_rows if row["category"] == "audiobook"}),
+        "incomplete_media_titles": sorted({row["title"] for row in all_rows if row["media_status"] == "incomplete"}),
     }
     return days, summary
 
@@ -1013,7 +1036,7 @@ def render_anki_day(bucket: dict[str, Any] | None) -> str:
 def mining_source_counter(records: list[MiningRecord]) -> Counter[str]:
     counter: Counter[str] = Counter()
     for record in records:
-        category = {"anime": "看番", "novel": "轻小说", "other": "其他"}.get(
+        category = {"anime": "看番", "novel": "轻小说", "audiobook": "有声书", "other": "其他"}.get(
             record.category, record.category
         )
         counter[f"{category}·{record.source_display}"] += 1
@@ -1089,11 +1112,20 @@ def render_anime_day(rows: list[dict[str, Any]]) -> str:
     )
 
 
-def render_reading_day(rows: list[dict[str, Any]]) -> str:
+def render_reading_day(rows: list[dict[str, Any]], *, audiobook: bool = False) -> str:
     if not rows:
         return "无可量化轻小说阅读记录。"
     total_seconds = sum(row["seconds"] for row in rows)
     total_characters = sum(row["characters"] for row in rows)
+    if audiobook:
+        details = "；".join(
+            f"《{md_escape(row['title'])}》{format_duration(row['seconds'])}、"
+            f"阅读器记录 {row['characters']:,.0f} 字" for row in rows
+        )
+        return (
+            f"关联阅读器计时共 {format_duration(total_seconds)}。明细：{details}。"
+            "按有声书关联归类，未拆分纯听与边听边读。"
+        )
     speed = total_characters / (total_seconds / 3600) if total_seconds > 0 else 0
     details = "；".join(
         f"《{md_escape(row['title'])}》{format_duration(row['seconds'])}、"
@@ -1147,6 +1179,8 @@ def daily_narrative(
     anki_seconds = anki["seconds"] if anki else 0
     anime_seconds = sum(row["seconds"] for row in anime)
     reading_seconds = sum(row["seconds"] for row in reading)
+    novels = [row for row in reading if row.get("category", "novel") == "novel"]
+    audiobooks = [row for row in reading if row.get("category") == "audiobook"]
     total = anki_seconds + anime_seconds + reading_seconds
     parts = []
     if index == 1:
@@ -1168,14 +1202,15 @@ def daily_narrative(
     category_times = {
         "卡片学习": anki_seconds,
         "看番": anime_seconds,
-        "轻小说": reading_seconds,
+        "轻小说": sum(row["seconds"] for row in novels),
+        "听有声书": sum(row["seconds"] for row in audiobooks),
     }
     active = [(label, seconds) for label, seconds in category_times.items() if seconds > 0]
     if active:
         focus, focus_seconds = max(active, key=lambda item: item[1])
         parts.append(f"今天可量化学习共 {format_duration(total)}，时间最多的是{focus}（{format_duration(focus_seconds)}）")
     else:
-        parts.append("今天没有检测到这三类工具中的可量化学习记录")
+        parts.append("今天没有检测到这些来源中的可量化学习记录")
 
     if anki and anki["review_count"]:
         deck_seconds = Counter(
@@ -1190,8 +1225,10 @@ def daily_narrative(
         parts.append(f"我还新建了 {len(mining):,} 张词句挖掘卡")
     if anime:
         parts.append(f"看番涉及 {len(anime):,} 个观看集次")
-    if reading:
-        parts.append(f"轻小说主读《{reading[0]['title']}》")
+    if novels:
+        parts.append(f"轻小说主读《{novels[0]['title']}》")
+    if audiobooks:
+        parts.append(f"有声书相关学习涉及《{audiobooks[0]['title']}》")
     return "。".join(parts) + "。"
 
 
@@ -1207,6 +1244,14 @@ def render_summary_table(
     )
     mode_seconds: Counter[str] = anime_summary["mode_seconds"]
     mode_entries: Counter[str] = anime_summary["mode_entries"]
+    novel_summary = reading_summary.get("categories", {}).get("novel", reading_summary)
+    audio_summary = reading_summary.get("categories", {}).get("audiobook", {})
+    audio_rows = []
+    if audio_summary.get("seconds", 0) > 0:
+        audio_rows.append(
+            f"| 听有声书 | {audio_summary['seconds'] / 3600:.1f} 小时 | {audio_summary['active_days']} 天 | "
+            f"{audio_summary['titles']:,} 册；按关联阅读器计时归类 |"
+        )
     return [
         "| 类别 | 一周年累计 | 活跃天数 | 额外数量 |",
         "|---|---:|---:|---|",
@@ -1221,8 +1266,9 @@ def render_summary_table(
         f"{len(anime_summary['mode_active_days']['无字幕'])} 天 | "
         f"{len(anime_summary['mode_editions']['无字幕']):,} 部；"
         f"{mode_entries['无字幕']:,} 个观看集次 |",
-        f"| 读轻小说 | {reading_summary['seconds'] / 3600:.1f} 小时 | {reading_summary['active_days']} 天 | "
-        f"{reading_summary['titles']:,} 册；{reading_summary['characters']:,.0f} 字 |",
+        f"| 读轻小说 | {novel_summary['seconds'] / 3600:.1f} 小时 | {novel_summary['active_days']} 天 | "
+        f"{novel_summary['titles']:,} 册；{novel_summary['characters']:,.0f} 字 |",
+        *audio_rows,
         f"| **合计** | **{total_seconds / 3600:.1f} 小时** | **{day_count} 个自然日** | "
         f"日均 **{total_seconds / day_count / 60:.0f} 分钟** |",
     ]
@@ -1249,7 +1295,8 @@ def generate_report(
         anki_summary["seconds"] + anime_summary["seconds"] + reading_summary["seconds"]
     )
     first_mining_day = min(mining_days) if mining_days else None
-    first_reading_day = min(reading_days) if reading_days else None
+    novel_dates = [day for day, rows in reading_days.items() if any(row.get("category", "novel") == "novel" for row in rows)]
+    first_reading_day = min(novel_dates) if novel_dates else None
     first_listening_feedback_day = (
         min(listening_feedback_days) if listening_feedback_days else None
     )
@@ -1265,7 +1312,7 @@ def generate_report(
     peak_day = max(daily_totals, key=daily_totals.get)
     peak_anki = max(all_days, key=lambda day: (anki_days.get(day) or {}).get("seconds", 0))
     peak_anime = max(all_days, key=lambda day: sum(row["seconds"] for row in anime_days.get(day, [])))
-    peak_reading = max(all_days, key=lambda day: sum(row["seconds"] for row in reading_days.get(day, [])))
+    peak_reading = max(all_days, key=lambda day: sum(row["seconds"] for row in reading_days.get(day, []) if row.get("category", "novel") == "novel"))
 
     lines = [
         f"# 从 {start:%Y-%m-%d} 到 {end:%Y-%m-%d}：我的日语学习一周年日记",
@@ -1274,7 +1321,7 @@ def generate_report(
         f"{anki_summary['first_time']:%Y-%m-%d %H:%M}；本报告的数据快照生成于 "
         f"{datetime.now(TIME_ZONE):%Y-%m-%d %H:%M}。",
         "",
-        "这一年，我把日语学习慢慢变成了三条并行的线：每天处理卡片，把看番时遇到的表达做成词句挖掘卡；"
+        "这一年，我把日语学习慢慢变成了几条并行的线：每天处理卡片，把看番时遇到的表达做成词句挖掘卡；"
         "从 2026 年 2 月起，再把轻小说阅读纳入稳定记录。下面不是凭印象补写，而是逐日还原我确实留下的数据。",
         "",
         "## 一周年总账",
@@ -1330,6 +1377,8 @@ def generate_report(
         "“未听懂条目占比”是被标记的台词条目数除以配对原字幕条目数，只覆盖实际留下记录的集数，"
         "不能把未覆盖条目解释为已经听懂，也不能直接等同于标准化听力正确率。",
         "- 轻小说使用 Hoshi Reader 阅读统计中的时长与字符数；单条少于 60 秒的统计被阅读数据脚本过滤。",
+        "- 听有声书按有效 Sasayaki 音频绑定和文字对齐识别，将对应卷册的阅读器计时从轻小说移入有声书；"
+        "同一条记录只计一次。这是书籍级关联口径，现有日志不能拆分纯听与边听边读，播放位置不作为累计时长。",
         "- 每天新建的词句挖掘卡直接展开，只保留词句本身，不再逐条列出例句与来源；原始数据库没有被改动。",
         "",
         "## 逐日学习日记",
@@ -1374,8 +1423,12 @@ def generate_report(
             day_lines.append(f"- **词句挖掘卡**：{render_mining_summary(mining)}")
         if anime:
             day_lines.append(f"- **看番**：{render_anime_day(anime)}")
-        if reading:
-            day_lines.append(f"- **读轻小说**：{render_reading_day(reading)}")
+        novels = [row for row in reading if row.get("category", "novel") == "novel"]
+        audiobooks = [row for row in reading if row.get("category") == "audiobook"]
+        if novels:
+            day_lines.append(f"- **读轻小说**：{render_reading_day(novels)}")
+        if audiobooks:
+            day_lines.append(f"- **听有声书**：{render_reading_day(audiobooks, audiobook=True)}")
         if listening_feedback:
             day_lines.append(
                 f"- **听力反馈记录**：{render_listening_feedback_day(listening_feedback)}"
@@ -1435,7 +1488,9 @@ def main() -> None:
             kaishi_days, kaishi_summary = load_kaishi_days(
                 conn, args.start, args.end
             )
-            mining_days, mining_summary = load_mining_records(conn, args.start, args.end)
+            mining_days, mining_summary = load_mining_records(
+                conn, args.start, args.end, books_dir=args.books_dir.expanduser().resolve()
+            )
             anime_days, anime_summary = allocate_anime_days(
                 mining_summary["records"], args.start, args.end
             )
@@ -1502,9 +1557,11 @@ def main() -> None:
         ),
         "subtitledHours": round(anime_summary["mode_seconds"]["日语字幕"] / 3600, 3),
         "unsubtitledHours": round(anime_summary["mode_seconds"]["无字幕"] / 3600, 3),
-        "readingHours": round(reading_summary["seconds"] / 3600, 3),
-        "readingVolumes": reading_summary["titles"],
-        "readingCharacters": round(reading_summary["characters"]),
+        "readingHours": round(reading_summary["categories"]["novel"]["seconds"] / 3600, 3),
+        "readingVolumes": reading_summary["categories"]["novel"]["titles"],
+        "readingCharacters": round(reading_summary["categories"]["novel"]["characters"]),
+        "audiobookHours": round(reading_summary["categories"]["audiobook"]["seconds"] / 3600, 3),
+        "audiobookVolumes": reading_summary["categories"]["audiobook"]["titles"],
         "totalHours": round(
             (
                 anki_summary["seconds"]
